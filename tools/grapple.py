@@ -1,0 +1,527 @@
+#!/usr/bin/env python3
+"""
+Grapple Pipeline — Adversarial multi-model code review orchestrator.
+
+Usage:
+    python3 grapple.py --task "description" --files "file1.py,file2.py" --project "projectname"
+    python3 grapple.py --task "description" --files "file1.py,file2.py" --project "projectname" --project-dir /path/to/repo
+
+Orchestrates: Writer → Reviewer → Fix Loop → Commit
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+# ── Configuration ──────────────────────────────────────────────────────────
+WRITER_MODEL = "kiro-4040/claude-opus-4-6"
+REVIEWER_MODEL = "cortex-openai/gpt-5.3-codex"
+JUDGE_MODEL = "vertex-gemini/gemini-3-pro"
+TELEGRAM_CHAT = "1260478841"
+MAX_ROUNDS = 3
+ROUND_TIMEOUT = 600  # 10 min per round
+APPROVE_THRESHOLD = 70
+AUTO_APPROVE_THRESHOLD = 90
+DIMINISHING_DELTA = 5
+
+# Severity weights
+W_CRITICAL = 25
+W_MAJOR = 10
+W_MINOR = 2
+
+
+def telegram(msg: str) -> None:
+    """Send a message to Master via Telegram."""
+    try:
+        subprocess.run(
+            [
+                "openclaw", "message", "send",
+                "--channel", "telegram",
+                "-t", TELEGRAM_CHAT,
+                "-m", msg,
+            ],
+            capture_output=True, timeout=30,
+        )
+    except Exception:
+        pass  # best-effort
+
+
+def run_agent(prompt: str, model: str, workdir: str, label: str, timeout: int = ROUND_TIMEOUT) -> tuple[int, str]:
+    """Run an openclaw agent turn and return (returncode, stdout)."""
+    env = os.environ.copy()
+    env["OPENCODE_MODEL"] = model
+    cmd = [
+        "openclaw", "agent",
+        "--agent", "worker",
+        "--local",
+        "-m", prompt,
+        "--timeout", str(timeout),
+    ]
+    print(f"  ⏳ {label} running ({model})...")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout + 30,
+            cwd=workdir, env=env,
+        )
+        return result.returncode, result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        print(f"  ⏰ {label} timed out after {timeout}s")
+        return 1, f"TIMEOUT after {timeout}s"
+    except Exception as e:
+        return 1, str(e)
+
+
+def run_omo(agent: str, prompt: str, workdir: str, label: str, timeout: int = ROUND_TIMEOUT) -> tuple[int, str]:
+    """Run via omo (preferred) with a specific agent profile."""
+    cmd = ["omo", "run", "--agent", agent, prompt]
+    print(f"  ⏳ {label} running (omo --agent {agent})...")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout + 30,
+            cwd=workdir,
+        )
+        return result.returncode, result.stdout + result.stderr
+    except subprocess.TimeoutExpired:
+        print(f"  ⏰ {label} timed out after {timeout}s")
+        return 1, f"TIMEOUT after {timeout}s"
+    except Exception as e:
+        return 1, str(e)
+
+
+def parse_review(review_path: str) -> dict:
+    """Parse a review file for CRITICAL/MAJOR/MINOR counts, score, and verdict."""
+    result = {"critical": 0, "major": 0, "minor": 0, "score": 0, "verdict": "REQUEST_CHANGES", "raw": ""}
+    if not os.path.isfile(review_path):
+        print(f"  ⚠️  Review file not found: {review_path}")
+        return result
+
+    text = Path(review_path).read_text()
+    result["raw"] = text
+
+    # Extract counts — look for patterns like "critical: 2" or "CRITICAL: 2" or "Critical count: 2"
+    for severity in ("critical", "major", "minor"):
+        patterns = [
+            rf'{severity}\s*[:=]\s*(\d+)',
+            rf'{severity}_count\s*[:=]\s*(\d+)',
+            rf'{severity}s?\s*[:=]\s*(\d+)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                result[severity] = int(m.group(1))
+                break
+
+    # Extract satisfaction score
+    for pat in [r'satisfaction_score\s*[:=]\s*(\d+)', r'score\s*[:=]\s*(\d+)', r'Score:\s*(\d+)']:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            result["score"] = int(m.group(1))
+            break
+    else:
+        # Calculate from counts if not explicitly stated
+        penalty = (result["critical"] * W_CRITICAL) + (result["major"] * W_MAJOR) + (result["minor"] * W_MINOR)
+        result["score"] = max(0, 100 - penalty)
+
+    # Extract verdict
+    for pat in [r'VERDICT\s*[:=]\s*(\w+)', r'verdict\s*[:=]\s*(\w+)']:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            v = m.group(1).upper()
+            if v in ("APPROVE", "REQUEST_CHANGES", "REJECT", "ESCALATE"):
+                result["verdict"] = v
+            break
+
+    return result
+
+
+def extract_issue_hashes(review_text: str) -> set:
+    """Hash issue descriptions for repeat detection."""
+    hashes = set()
+    # Match lines that look like issue items (- [ ] CRITICAL: ..., * MAJOR: ..., etc.)
+    for m in re.finditer(r'(?:[-*]\s*(?:\[.\])?\s*)?(CRITICAL|MAJOR|MINOR)\s*[:—-]\s*(.+)', review_text, re.IGNORECASE):
+        desc = m.group(2).strip().lower()
+        hashes.add(hashlib.md5(desc.encode()).hexdigest()[:12])
+    return hashes
+
+
+def generate_commit_message(project_dir: str, files: list[str]) -> str:
+    """Generate a conventional commit message from the diff."""
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "--cached", "--stat"] + files,
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        stat = diff_result.stdout.strip()
+    except Exception:
+        stat = ""
+
+    # Use the agent to generate a commit message
+    try:
+        result = subprocess.run(
+            [
+                "openclaw", "agent", "--local",
+                "--agent", "worker",
+                "-m", (
+                    f"Generate a single-line conventional commit message (type(scope): description) "
+                    f"for these changes. Output ONLY the commit message, nothing else.\n\n"
+                    f"Changed files:\n{stat}"
+                ),
+                "--timeout", "60",
+            ],
+            capture_output=True, text=True, timeout=90, cwd=project_dir,
+            env={**os.environ, "OPENCODE_MODEL": "vertex-gemini/gemini-3-flash-preview"},
+        )
+        msg = result.stdout.strip().split("\n")[0].strip()
+        # Sanitize — must look like type(scope): desc or type: desc
+        if re.match(r'^[a-z]+(\([^)]+\))?:\s*.+', msg):
+            return msg
+    except Exception:
+        pass
+
+    return f"feat({Path(project_dir).name}): grapple-approved changes"
+
+
+def commit_and_push(project_dir: str, files: list[str], task: str) -> bool:
+    """Stage, commit, and push approved changes."""
+    try:
+        # Stage files
+        subprocess.run(["git", "add"] + files, cwd=project_dir, check=True)
+
+        # Generate commit message
+        msg = generate_commit_message(project_dir, files)
+        print(f"  📝 Commit: {msg}")
+
+        # Commit
+        subprocess.run(["git", "commit", "-m", msg], cwd=project_dir, check=True)
+
+        # Push
+        result = subprocess.run(
+            ["git", "push"], cwd=project_dir, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            print(f"  ⚠️  Push failed: {result.stderr}")
+            return False
+
+        # Get commit hash
+        hash_result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        commit_hash = hash_result.stdout.strip()
+        print(f"  ✅ Pushed: {commit_hash}")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  ❌ Git error: {e}")
+        return False
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Grapple Pipeline — Adversarial Code Review")
+    parser.add_argument("--task", required=True, help="Task description for the writer")
+    parser.add_argument("--files", required=True, help="Comma-separated list of files to modify")
+    parser.add_argument("--project", required=True, help="Project name (used for temp dir and scope)")
+    parser.add_argument("--project-dir", default=None, help="Project directory (defaults to cwd)")
+    parser.add_argument("--no-commit", action="store_true", help="Skip commit phase")
+    parser.add_argument("--no-telegram", action="store_true", help="Skip Telegram notifications")
+    parser.add_argument("--max-rounds", type=int, default=MAX_ROUNDS, help=f"Max review rounds (default: {MAX_ROUNDS})")
+    args = parser.parse_args()
+
+    project_dir = args.project_dir or os.getcwd()
+    files = [f.strip() for f in args.files.split(",") if f.strip()]
+    grapple_dir = f"/tmp/grapple-{args.project}"
+    max_rounds = args.max_rounds
+
+    # Notification helper
+    notify = telegram if not args.no_telegram else (lambda m: None)
+
+    # Setup
+    os.makedirs(grapple_dir, exist_ok=True)
+    # Clean previous artifacts
+    for f in Path(grapple_dir).glob("*"):
+        f.unlink()
+
+    files_str = ", ".join(files)
+    start_time = time.time()
+
+    print(f"🔥 Grapple Pipeline — {args.project}")
+    print(f"   Task: {args.task}")
+    print(f"   Files: {files_str}")
+    print(f"   Dir: {project_dir}")
+    print(f"   Artifacts: {grapple_dir}")
+    print()
+
+    notify(f"🔥 Grapple started: {args.project}\nTask: {args.task}\nFiles: {files_str}")
+
+    # ── Metrics tracking ──
+    metrics = {
+        "project": args.project,
+        "task": args.task,
+        "files": files,
+        "start_time": datetime.now(timezone.utc).isoformat(),
+        "rounds": [],
+        "total_rounds": 0,
+        "final_verdict": None,
+        "termination_reason": None,
+    }
+
+    prev_score = 0
+    prev_issues: set = set()
+
+    for round_num in range(1, max_rounds + 1):
+        round_start = time.time()
+        print(f"── Round {round_num}/{max_rounds} ──────────────────────────────")
+
+        # ── WRITER PHASE ──
+        if round_num == 1:
+            writer_prompt = (
+                f"Implement the following task. Modify only these files: {files_str}\n\n"
+                f"Task: {args.task}\n\n"
+                f"Working directory: {project_dir}\n"
+                f"After making changes, save a summary of what you changed to {grapple_dir}/REVIEW_REQUEST.md"
+            )
+        else:
+            prev_review = f"{grapple_dir}/REVIEW_R{round_num - 1}.md"
+            writer_prompt = (
+                f"Address the review feedback in {prev_review}.\n"
+                f"Files to fix: {files_str}\n"
+                f"Working directory: {project_dir}\n"
+                f"Original task: {args.task}\n"
+                f"Update {grapple_dir}/REVIEW_REQUEST.md with what you changed."
+            )
+
+        print(f"\n  📝 Writer Phase (Round {round_num})")
+        rc, output = run_omo("prometheus", writer_prompt, project_dir, f"Writer R{round_num}")
+        if rc != 0:
+            # Retry once
+            print(f"  ⚠️  Writer failed (rc={rc}), retrying...")
+            rc, output = run_agent(writer_prompt, WRITER_MODEL, project_dir, f"Writer R{round_num} retry")
+            if rc != 0:
+                msg = f"❌ Grapple {args.project} R{round_num}: Writer failed twice. Escalating."
+                print(f"  {msg}")
+                notify(msg)
+                metrics["final_verdict"] = "ESCALATE"
+                metrics["termination_reason"] = "writer_failure"
+                break
+
+        # ── REVIEWER PHASE ──
+        review_file = f"{grapple_dir}/REVIEW_R{round_num}.md"
+        reviewer_prompt = (
+            f"You are a code reviewer. Review the changes described in {grapple_dir}/REVIEW_REQUEST.md "
+            f"and the actual files: {files_str} in {project_dir}.\n\n"
+            f"Original task: {args.task}\n\n"
+            f"Write your review to {review_file} with this EXACT format:\n\n"
+            f"# Review Round {round_num}\n\n"
+            f"## Findings\n"
+            f"List each issue as:\n"
+            f"- CRITICAL: <description>\n"
+            f"- MAJOR: <description>\n"
+            f"- MINOR: <description>\n\n"
+            f"## Summary\n"
+            f"critical: <count>\n"
+            f"major: <count>\n"
+            f"minor: <count>\n"
+            f"satisfaction_score: <0-100, calculated as 100 - critical*{W_CRITICAL} - major*{W_MAJOR} - minor*{W_MINOR}>\n\n"
+            f"VERDICT: APPROVE or REQUEST_CHANGES\n\n"
+            f"Integration Safety (mandatory checks):\n"
+            f"- Check all modified imports and verify they resolve to existing modules\n"
+            f"- Verify API contracts (function signatures, return types) are not broken for callers\n"
+            f"- Flag any changes to shared interfaces or exported symbols that could break dependents\n"
+            f"- Confirm new dependencies are actually installed/available\n\n"
+            f"Intent Verification (mandatory checks):\n"
+            f"- Compare the diff against the original task description\n"
+            f"- Flag any files modified that are outside the task's stated scope\n"
+            f"- Reject changes that add unrelated features or refactors not requested\n"
+            f"- Verify the change actually addresses the stated problem (not just adjacent code)\n\n"
+            f"Rules:\n"
+            f"- APPROVE only if score >= {AUTO_APPROVE_THRESHOLD} and zero CRITICALs\n"
+            f"- Be thorough but fair. Don't nitpick style if logic is sound.\n"
+            f"- Focus on: security, correctness, error handling, edge cases, integration safety, intent alignment"
+        )
+
+        print(f"\n  🔍 Reviewer Phase (Round {round_num})")
+        rc, output = run_omo("momus", reviewer_prompt, project_dir, f"Reviewer R{round_num}")
+        if rc != 0:
+            # Retry with openclaw agent directly
+            print(f"  ⚠️  Reviewer failed (rc={rc}), retrying with openclaw agent...")
+            rc, output = run_agent(reviewer_prompt, REVIEWER_MODEL, project_dir, f"Reviewer R{round_num} retry")
+            if rc != 0:
+                msg = f"❌ Grapple {args.project} R{round_num}: Reviewer failed twice. Escalating."
+                print(f"  {msg}")
+                notify(msg)
+                metrics["final_verdict"] = "ESCALATE"
+                metrics["termination_reason"] = "reviewer_failure"
+                break
+
+        # ── Parse Review ──
+        review = parse_review(review_file)
+        score = review["score"]
+        verdict = review["verdict"]
+        delta = score - prev_score
+        round_duration = int(time.time() - round_start)
+
+        round_metric = {
+            "round": round_num,
+            "critical": review["critical"],
+            "major": review["major"],
+            "minor": review["minor"],
+            "satisfaction_score": score,
+            "delta_from_previous": delta if round_num > 1 else None,
+            "verdict": verdict,
+            "duration_sec": round_duration,
+            "termination_reason": None,
+        }
+
+        print(f"\n  📊 R{round_num}: score={score} (C={review['critical']} M={review['major']} m={review['minor']}) delta={delta} verdict={verdict}")
+        notify(f"📊 Grapple {args.project} R{round_num}: score={score} C={review['critical']} M={review['major']} m={review['minor']} → {verdict}")
+
+        # ── Repeat detection ──
+        current_issues = extract_issue_hashes(review.get("raw", ""))
+        if prev_issues and current_issues:
+            overlap = len(current_issues & prev_issues)
+            total = max(len(current_issues), 1)
+            if overlap / total > 0.5:
+                msg = f"⚠️ Grapple {args.project}: >50% issues repeated R{round_num-1}→R{round_num}. Escalating to Master."
+                print(f"  {msg}")
+                notify(msg)
+                round_metric["termination_reason"] = "repeat_loop_detected"
+                metrics["rounds"].append(round_metric)
+                metrics["final_verdict"] = "ESCALATE"
+                metrics["termination_reason"] = "repeat_loop_detected"
+                break
+
+        # ── Termination checks ──
+        # Auto-approve: high score, no criticals
+        if score >= AUTO_APPROVE_THRESHOLD and review["critical"] == 0:
+            round_metric["termination_reason"] = "score_above_90_no_criticals"
+            metrics["rounds"].append(round_metric)
+            metrics["final_verdict"] = "APPROVE"
+            metrics["termination_reason"] = "score_above_90_no_criticals"
+            print(f"\n  ✅ AUTO-APPROVE: score={score} >= {AUTO_APPROVE_THRESHOLD}, zero criticals")
+            break
+
+        # Diminishing returns: small delta after round 2
+        if round_num >= 2 and delta < DIMINISHING_DELTA and score >= APPROVE_THRESHOLD:
+            round_metric["termination_reason"] = "diminishing_returns"
+            metrics["rounds"].append(round_metric)
+            metrics["final_verdict"] = "APPROVE"
+            metrics["termination_reason"] = "diminishing_returns"
+            print(f"\n  ✅ APPROVE (diminishing returns): delta={delta} < {DIMINISHING_DELTA}, score={score} >= {APPROVE_THRESHOLD}")
+            break
+
+        # Explicit approve from reviewer
+        if verdict == "APPROVE" and review["critical"] == 0:
+            round_metric["termination_reason"] = "reviewer_approved"
+            metrics["rounds"].append(round_metric)
+            metrics["final_verdict"] = "APPROVE"
+            metrics["termination_reason"] = "reviewer_approved"
+            print(f"\n  ✅ APPROVE: Reviewer approved with score={score}")
+            break
+
+        # Hard cap
+        if round_num == max_rounds:
+            # Judge arbitration
+            print(f"\n  ⚖️  Hard cap reached. Invoking Judge...")
+            judge_file = f"{grapple_dir}/JUDGE_DECISION.md"
+            judge_prompt = (
+                f"You are the Judge in an adversarial code review.\n"
+                f"Read all artifacts in {grapple_dir}/ and the files {files_str} in {project_dir}.\n"
+                f"Task: {args.task}\n\n"
+                f"Review history: {round_num} rounds, latest score={score}.\n"
+                f"Decide: APPROVE, REJECT, or ESCALATE.\n"
+                f"Write your decision to {judge_file} with:\n"
+                f"VERDICT: <your decision>\n"
+                f"Reasoning: <brief explanation>"
+            )
+            rc, output = run_agent(judge_prompt, JUDGE_MODEL, project_dir, "Judge")
+            if rc == 0 and os.path.isfile(judge_file):
+                judge_text = Path(judge_file).read_text()
+                judge_verdict = "ESCALATE"
+                m = re.search(r'VERDICT\s*[:=]\s*(\w+)', judge_text, re.IGNORECASE)
+                if m:
+                    jv = m.group(1).upper()
+                    if jv in ("APPROVE", "REJECT", "ESCALATE"):
+                        judge_verdict = jv
+
+                round_metric["termination_reason"] = f"judge_{judge_verdict.lower()}"
+                metrics["rounds"].append(round_metric)
+                metrics["final_verdict"] = judge_verdict
+                metrics["termination_reason"] = f"judge_{judge_verdict.lower()}"
+                print(f"  ⚖️  Judge verdict: {judge_verdict}")
+                notify(f"⚖️ Grapple {args.project} Judge: {judge_verdict}")
+            else:
+                round_metric["termination_reason"] = "judge_failure"
+                metrics["rounds"].append(round_metric)
+                metrics["final_verdict"] = "ESCALATE"
+                metrics["termination_reason"] = "judge_failure"
+                notify(f"⚠️ Grapple {args.project}: Judge failed. Escalating to Master.")
+            break
+
+        # Continue to next round
+        metrics["rounds"].append(round_metric)
+        prev_score = score
+        prev_issues = current_issues
+        print(f"\n  🔄 Continuing to Round {round_num + 1}...")
+
+    # ── Finalize ──
+    total_duration = int(time.time() - start_time)
+    metrics["total_rounds"] = len(metrics["rounds"])
+    metrics["total_duration_sec"] = total_duration
+    metrics["end_time"] = datetime.now(timezone.utc).isoformat()
+
+    # Write metrics
+    metrics_file = f"{grapple_dir}/GRAPPLE_METRICS.json"
+    Path(metrics_file).write_text(json.dumps(metrics, indent=2))
+    print(f"\n  📁 Metrics: {metrics_file}")
+
+    final = metrics.get("final_verdict", "ESCALATE")
+
+    # ── Commit Phase ──
+    if final == "APPROVE" and not args.no_commit:
+        print(f"\n── Commit Phase ──────────────────────────────────────")
+        success = commit_and_push(project_dir, files, args.task)
+        if success:
+            hash_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, cwd=project_dir,
+            )
+            commit_hash = hash_result.stdout.strip()
+            msg = (
+                f"✅ Grapple {args.project} APPROVED & PUSHED\n"
+                f"Commit: {commit_hash}\n"
+                f"Rounds: {metrics['total_rounds']} | Score: {metrics['rounds'][-1]['satisfaction_score']}\n"
+                f"Reason: {metrics['termination_reason']}\n"
+                f"Duration: {total_duration}s"
+            )
+            print(f"\n{msg}")
+            notify(msg)
+        else:
+            msg = f"⚠️ Grapple {args.project}: Approved but commit/push failed. Check {grapple_dir}"
+            print(f"\n  {msg}")
+            notify(msg)
+    elif final == "APPROVE":
+        msg = f"✅ Grapple {args.project} APPROVED (no-commit mode). Duration: {total_duration}s"
+        print(f"\n{msg}")
+        notify(msg)
+    else:
+        msg = (
+            f"⚠️ Grapple {args.project}: {final}\n"
+            f"Rounds: {metrics['total_rounds']} | Duration: {total_duration}s\n"
+            f"Reason: {metrics.get('termination_reason', 'unknown')}\n"
+            f"Artifacts: {grapple_dir}"
+        )
+        print(f"\n{msg}")
+        notify(msg)
+
+    # Exit code
+    sys.exit(0 if final == "APPROVE" else 1)
+
+
+if __name__ == "__main__":
+    main()
