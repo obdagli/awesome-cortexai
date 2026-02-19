@@ -33,9 +33,21 @@ ok()   { printf '%b[grapple ✓]%b %s\n' "$_GREEN"  "$_NC" "$*" >&2; }
 # from temp files written by the orchestrator (avoids ARG_MAX overflow).
 load_ctx_vars() {
   if [[ -n "${GRAPPLE_CTX_DIR:-}" && -d "$GRAPPLE_CTX_DIR" ]]; then
-    [[ -f "$GRAPPLE_CTX_DIR/diff_content.txt" ]] && DIFF_CONTENT=$(cat "$GRAPPLE_CTX_DIR/diff_content.txt")
-    [[ -f "$GRAPPLE_CTX_DIR/review_context.txt" ]] && REVIEW_CONTEXT=$(cat "$GRAPPLE_CTX_DIR/review_context.txt")
-    [[ -f "$GRAPPLE_CTX_DIR/file_tree.txt" ]] && FILE_TREE=$(cat "$GRAPPLE_CTX_DIR/file_tree.txt")
+    local _ctx_file
+    for _ctx_file in diff_content.txt review_context.txt file_tree.txt; do
+      local _ctx_path="$GRAPPLE_CTX_DIR/$_ctx_file"
+      if [[ ! -e "$_ctx_path" ]]; then
+        continue  # optional file, silently skip
+      elif [[ ! -r "$_ctx_path" ]]; then
+        warn "load_ctx_vars: file exists but is not readable: $_ctx_path"
+        continue
+      fi
+      case "$_ctx_file" in
+        diff_content.txt)    DIFF_CONTENT=$(cat "$_ctx_path") ;;
+        review_context.txt)  REVIEW_CONTEXT=$(cat "$_ctx_path") ;;
+        file_tree.txt)       FILE_TREE=$(cat "$_ctx_path") ;;
+      esac
+    done
   fi
 }
 
@@ -403,6 +415,7 @@ compute_diff_hash() {
 #   $3 = primary model
 #   $4 = fallback model
 #   $5 = prompt file path (created by make_prompt_file)
+#   $6 = (optional) tertiary fallback model
 #
 # Outputs: parsed JSON to stdout
 # Returns: 0 on success, 1 on failure/hard-fail, 2 on timeout
@@ -412,6 +425,7 @@ run_gate() {
   local primary_model="$3"
   local fallback_model="$4"
   local prompt_file="$5"
+  local tertiary_model="${6:-}"
 
   if [[ ! -f "$prompt_file" ]]; then
     err "run_gate($gate_name): prompt file not found: $prompt_file"
@@ -422,14 +436,36 @@ run_gate() {
   output_file=$(mktemp)
   _GRAPPLE_TEMPS+=("$output_file")
 
+  # Build model chain: primary → fallback → tertiary (if provided)
+  local -a model_chain=("$primary_model" "$fallback_model")
+  if [[ -n "$tertiary_model" ]]; then
+    model_chain+=("$tertiary_model")
+  fi
+  local max_attempts=${#model_chain[@]}
+
   local model="$primary_model"
   local fallback_used=false
   local attempt=0
-  local max_attempts=2  # primary + 1 fallback
 
   while (( attempt < max_attempts )); do
+    model="${model_chain[$attempt]}"
     (( attempt++ ))
-    log "run_gate($gate_name): attempt $attempt with model=$model, timeout=${gate_timeout}s"
+
+    # Fast-skip cliproxyapi/* models if the local proxy (localhost:8317) isn't reachable.
+    # Avoids wasting time on a model that can't resolve without the proxy running.
+    if [[ "$model" == cliproxyapi/* ]]; then
+      if command -v curl &>/dev/null; then
+        if ! curl -s --connect-timeout 2 http://127.0.0.1:8317/v1/models >/dev/null 2>&1; then
+          warn "run_gate($gate_name): skipping $model — cliproxyapi proxy not reachable on localhost:8317"
+          fallback_used=true
+          continue
+        fi
+      else
+        warn "run_gate($gate_name): curl not available, skipping reachability check for $model"
+      fi
+    fi
+
+    log "run_gate($gate_name): attempt $attempt/$max_attempts with model=$model, timeout=${gate_timeout}s"
 
     local exit_code=0
     local raw_output_file
@@ -450,9 +486,8 @@ run_gate() {
     if (( exit_code == 124 )); then
       warn "run_gate($gate_name): timeout after ${gate_timeout}s"
       if (( attempt < max_attempts )); then
-        model="$fallback_model"
         fallback_used=true
-        warn "run_gate($gate_name): falling back to $model"
+        warn "run_gate($gate_name): falling back to ${model_chain[$attempt]}"
         continue
       fi
       # Return partial output if available
@@ -467,9 +502,8 @@ run_gate() {
     if (( exit_code != 0 )); then
       warn "run_gate($gate_name): opencode exited with code $exit_code"
       if (( attempt < max_attempts )); then
-        model="$fallback_model"
         fallback_used=true
-        warn "run_gate($gate_name): falling back to $model"
+        warn "run_gate($gate_name): falling back to ${model_chain[$attempt]}"
         continue
       fi
       return 1
@@ -483,7 +517,7 @@ run_gate() {
         parsed_json=$(echo "$parsed_json" | jq \
           --arg req "$primary_model" \
           --arg act "$model" \
-          --arg reason "primary model failed on attempt $((attempt - 1))" \
+          --arg reason "primary model failed, succeeded on attempt $attempt" \
           '. + {"_model_fallback": {"requested": $req, "actual": $act, "reason": $reason}}')
       fi
       echo "$parsed_json"
@@ -491,9 +525,8 @@ run_gate() {
     else
       err "run_gate($gate_name): failed to parse JSON from output"
       if (( attempt < max_attempts )); then
-        model="$fallback_model"
         fallback_used=true
-        warn "run_gate($gate_name): falling back to $model (parse failure)"
+        warn "run_gate($gate_name): falling back to ${model_chain[$attempt]} (parse failure)"
         continue
       fi
       return 1

@@ -15,12 +15,19 @@ check_circuit_breaker "coding" || exit 1
 export TASK_DESCRIPTION CHANGED_FILES_LIST
 PROMPT_FILE=$(make_prompt_file "${GATE_DIR}/prompts/reviewer.md.tmpl")
 
-# Run gate
+# ── 3-Tier Model Fallback ────────────────────────────────────────────────────
+# Primary:    codex.claude.gg/gpt-5.3-codex  (remote API, always available)
+# Fallback 1: cliproxyapi/gpt-5.3-codex      (local proxy on localhost:8317)
+#   ⚠ DEPENDENCY: Requires "cliproxyapi" provider alias configured in opencode
+#   config (~/.config/opencode/config.json) pointing to http://127.0.0.1:8317.
+#   If the proxy isn't running, lib.sh run_gate() will skip it automatically.
+# Fallback 2: anthropic/claude-opus-4-6      (direct Anthropic API, last resort)
 GATE_MODEL="${GATE2_MODEL:-codex.claude.gg/gpt-5.3-codex}"
-GATE_FALLBACK="${GATE2_FALLBACK:-anthropic/claude-opus-4-6}"
+GATE_FALLBACK="${GATE2_FALLBACK:-cliproxyapi/gpt-5.3-codex}"
+GATE_FALLBACK2="${GATE2_FALLBACK2:-anthropic/claude-opus-4-6}"
 GATE_TIMEOUT="${GATE2_TIMEOUT:-180}"
 
-GATE_JSON=$(run_gate "gate2_reviewer" "$GATE_TIMEOUT" "$GATE_MODEL" "$GATE_FALLBACK" "$PROMPT_FILE") || true
+GATE_JSON=$(run_gate "gate2_reviewer" "$GATE_TIMEOUT" "$GATE_MODEL" "$GATE_FALLBACK" "$PROMPT_FILE" "$GATE_FALLBACK2") || true
 
 if [[ -z "$GATE_JSON" ]]; then
   err "Gate 2: Failed to parse reviewer output"
