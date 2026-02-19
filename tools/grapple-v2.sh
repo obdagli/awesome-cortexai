@@ -271,7 +271,7 @@ while true; do
     WRITER_EXIT=0
     timeout 300 opencode run -m "$WRITER_MODEL" \
       "Execute the coding task in the attached file. Follow its instructions exactly." \
-      --file "$WRITER_PROMPT_FILE" > /dev/null 2>&1 || WRITER_EXIT=$?
+      --file "$WRITER_PROMPT_FILE" --format json > /dev/null 2>&1 || WRITER_EXIT=$?
 
     if (( WRITER_EXIT == 124 )); then
       err "Gate 1: Writer timed out (300s)"

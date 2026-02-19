@@ -160,6 +160,39 @@ sys.exit(1)
   fi
 }
 
+# ── 4b. Extract text from opencode --format json output ──────────────────────
+# Reads JSONL events from opencode --format json and concatenates all "text" parts.
+# Args: $1 = file containing JSONL output (with -f flag) or stdin
+# Outputs: concatenated assistant text to stdout
+extract_opencode_text() {
+  local input=""
+  if [[ "${1:-}" == "-f" && -n "${2:-}" ]]; then
+    input=$(cat "$2" 2>/dev/null || true)
+  else
+    input=$(cat)
+  fi
+
+  [[ -z "$input" ]] && return 1
+
+  echo "$input" | python3 -c "
+import sys, json
+parts = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        evt = json.loads(line)
+        if evt.get('type') == 'text' and 'part' in evt:
+            t = evt['part'].get('text', '')
+            if t:
+                parts.append(t)
+    except (json.JSONDecodeError, KeyError):
+        continue
+print(''.join(parts))
+" 2>/dev/null
+}
+
 # ── 5. Write Trace ──────────────────────────────────────────────────────────
 # Write or update trace file using jq. No shell string interpolation for JSON.
 # Args: $1 = trace file path, $2 = jq filter, $3... = jq --arg pairs
@@ -390,10 +423,19 @@ run_gate() {
     log "run_gate($gate_name): attempt $attempt with model=$model, timeout=${gate_timeout}s"
 
     local exit_code=0
+    local raw_output_file
+    raw_output_file=$(mktemp)
+    _GRAPPLE_TEMPS+=("$raw_output_file")
+
     timeout "$gate_timeout" opencode run -m "$model" \
       "Execute the review task in the attached file. Follow its instructions exactly and respond with ONLY the JSON object specified." \
-      --file "$prompt_file" \
-      > "$output_file" 2>/dev/null || exit_code=$?
+      --file "$prompt_file" --format json \
+      > "$raw_output_file" 2>/dev/null || exit_code=$?
+
+    # Extract assistant text from JSONL events into output_file
+    if [[ -s "$raw_output_file" ]]; then
+      extract_opencode_text -f "$raw_output_file" > "$output_file"
+    fi
 
     # Timeout returns 124
     if (( exit_code == 124 )); then
