@@ -132,7 +132,7 @@ if ! cb_check "$DISPATCH_CATEGORY"; then
 fi
 
 # ── Compliance Gate (Enforcing) ──────────────────────────────────────────────
-COMPLIANCE_OUTPUT=$(python3 "${SCRIPT_DIR}/check-opencode-compliance.py" --gate 2>&1) || {
+COMPLIANCE_OUTPUT=$(python3 "${SCRIPT_DIR}/check-opencode-compliance.py" --gate --hours 2 2>&1) || {
   log "BLOCKED: compliance violations detected in recent worker logs"
   log "$COMPLIANCE_OUTPUT"
   log "Fix violations before dispatching new work. Run: python3 tools/check-opencode-compliance.py"

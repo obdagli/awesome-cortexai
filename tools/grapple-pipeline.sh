@@ -582,13 +582,18 @@ findings.append({
 })
 print(json.dumps(findings))
 ")
-    # Update REVIEW_JSON with injected finding
-    REVIEW_JSON=$(echo "$REVIEW_JSON" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-data['findings'] = json.loads('''$CURRENT_FINDINGS''')
-print(json.dumps(data))
-")
+    # Update REVIEW_JSON with injected finding (temp files to avoid shell injection)
+    _tmp_review=$(mktemp)
+    _tmp_findings=$(mktemp)
+    echo "$REVIEW_JSON" > "$_tmp_review"
+    echo "$CURRENT_FINDINGS" > "$_tmp_findings"
+    REVIEW_JSON=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: review = json.load(f)
+with open(sys.argv[2]) as f: review['findings'] = json.load(f)
+print(json.dumps(review))
+" "$_tmp_review" "$_tmp_findings")
+    rm -f "$_tmp_review" "$_tmp_findings"
   fi
 
   # Record round trace
