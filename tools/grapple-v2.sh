@@ -117,6 +117,87 @@ _gate_skipped() {
   return 1
 }
 
+# ── Smart Diff Capture ────────────────────────────────────────────────────────
+# Returns diff content via a fallback chain. Sets global DIFF_CAPTURE_METHOD.
+# Args: $1 = repo path (default: .)
+#       $2 = "nofix" to enable staged/working-tree fallbacks (optional)
+# Outputs: diff content to stdout
+_capture_diff() {
+  local repo="${1:-.}"
+  local mode="${2:-}"
+
+  # Primary: committed changes between HEAD~1 and HEAD
+  if (cd "$repo" && git rev-parse --verify HEAD~1 &>/dev/null); then
+    local diff
+    diff=$(cd "$repo" && git diff HEAD~1..HEAD 2>/dev/null || true)
+    if [[ -n "$diff" ]]; then
+      DIFF_CAPTURE_METHOD="HEAD~1..HEAD"
+      echo "$diff"
+      return 0
+    fi
+    # HEAD~1 exists but diff is empty — try nofix fallbacks
+    if [[ "$mode" == "nofix" ]]; then
+      diff=$(cd "$repo" && git diff --cached 2>/dev/null || true)
+      if [[ -n "$diff" ]]; then
+        DIFF_CAPTURE_METHOD="cached (nofix fallback)"
+        echo "$diff"
+        return 0
+      fi
+      diff=$(cd "$repo" && git diff HEAD 2>/dev/null || true)
+      if [[ -n "$diff" ]]; then
+        DIFF_CAPTURE_METHOD="HEAD (nofix fallback)"
+        echo "$diff"
+        return 0
+      fi
+    fi
+  else
+    # Initial commit — no HEAD~1
+    local diff
+    diff=$(cd "$repo" && git show HEAD --format="" --diff-filter=ACMR 2>/dev/null || true)
+    if [[ -n "$diff" ]]; then
+      DIFF_CAPTURE_METHOD="show HEAD (initial commit)"
+      echo "$diff"
+      return 0
+    fi
+    diff=$(cd "$repo" && git diff --cached 2>/dev/null || true)
+    if [[ -n "$diff" ]]; then
+      DIFF_CAPTURE_METHOD="cached (initial commit)"
+      echo "$diff"
+      return 0
+    fi
+  fi
+
+  DIFF_CAPTURE_METHOD="none"
+  return 1
+}
+
+# ── Smart Changed Files List ─────────────────────────────────────────────────
+# Mirrors _capture_diff fallback chain but returns --name-only file list.
+_capture_changed_files() {
+  local repo="${1:-.}"
+  local mode="${2:-}"
+
+  if (cd "$repo" && git rev-parse --verify HEAD~1 &>/dev/null); then
+    local files
+    files=$(cd "$repo" && git diff --name-only --diff-filter=ACMR HEAD~1..HEAD 2>/dev/null || true)
+    if [[ -n "$files" ]]; then echo "$files"; return 0; fi
+    if [[ "$mode" == "nofix" ]]; then
+      files=$(cd "$repo" && git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+      if [[ -n "$files" ]]; then echo "$files"; return 0; fi
+      files=$(cd "$repo" && git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
+      if [[ -n "$files" ]]; then echo "$files"; return 0; fi
+    fi
+  else
+    local files
+    files=$(cd "$repo" && git show HEAD --format="" --diff-filter=ACMR --name-only 2>/dev/null || true)
+    if [[ -n "$files" ]]; then echo "$files"; return 0; fi
+    files=$(cd "$repo" && git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+    if [[ -n "$files" ]]; then echo "$files"; return 0; fi
+  fi
+
+  return 1
+}
+
 # Require commands
 require_cmd jq opencode git || { err "Missing required commands"; exit 3; }
 
@@ -157,16 +238,22 @@ fi
 # Compute initial diff hash
 INITIAL_DIFF_HASH=$(compute_diff_hash "$WORK_DIR")
 
-# Build review context
+# Build review context — use smart fallback chain
+DIFF_CAPTURE_METHOD=""
+_NOFIX_MODE=""
+[[ "$NO_FIX" == "true" ]] && _NOFIX_MODE="nofix"
+
 CHANGED_FILES_LIST=""
 if [[ -n "$SCOPED_FILES" ]]; then
   CHANGED_FILES_LIST="$SCOPED_FILES"
 else
-  CHANGED_FILES_LIST=$(git -C "${WORK_DIR}" diff --cached --name-only --diff-filter=ACMR 2>/dev/null || \
-                       git -C "${WORK_DIR}" diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
-  if [[ -z "$CHANGED_FILES_LIST" ]]; then
-    CHANGED_FILES_LIST=$(git -C "${WORK_DIR}" diff --name-only HEAD~1 2>/dev/null || true)
-  fi
+  CHANGED_FILES_LIST=$(_capture_changed_files "$WORK_DIR" "$_NOFIX_MODE" || true)
+fi
+
+# Validate we have something to review
+if [[ -z "$CHANGED_FILES_LIST" && -z "$SCOPED_FILES" ]]; then
+  err "No changes detected to review"
+  exit 3
 fi
 
 # Build skipped gates list for trace
@@ -216,7 +303,10 @@ fi
 FILE_TREE=$(find . -maxdepth 3 -not -path './.git/*' -not -path './node_modules/*' \
   -not -path './.grapple/*' 2>/dev/null | head -500 | sort || true)
 
-DIFF_CONTENT=$(git diff HEAD 2>/dev/null || git diff --cached 2>/dev/null || true)
+DIFF_CONTENT=$(_capture_diff "$WORK_DIR" "$_NOFIX_MODE" || true)
+if [[ -n "$DIFF_CAPTURE_METHOD" && "$DIFF_CAPTURE_METHOD" != "none" ]]; then
+  log "Diff capture method: $DIFF_CAPTURE_METHOD"
+fi
 REVIEW_CONTEXT=$(build_review_context "$WORK_DIR")
 
 # Write large context to temp files to avoid ARG_MAX overflow on export
@@ -268,6 +358,9 @@ while true; do
     export TASK_DESCRIPTION INVOCATION_CONTRACT REVIEW_CONTEXT
     WRITER_PROMPT_FILE=$(make_prompt_file "${SCRIPT_DIR}/grapple-v2/prompts/writer.md.tmpl")
 
+    # Save HEAD SHA before writer runs for precise post-writer diff
+    PRE_WRITER_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+
     WRITER_EXIT=0
     timeout 300 opencode run -m "$WRITER_MODEL" \
       "Execute the coding task in the attached file. Follow its instructions exactly." \
@@ -285,9 +378,26 @@ while true; do
 
     ok "Gate 1: Writer completed"
 
-    # Capture diff after writer
-    DIFF_CONTENT=$(git diff HEAD 2>/dev/null || git diff --cached 2>/dev/null || true)
-    CHANGED_FILES_LIST=$(git diff --name-only HEAD 2>/dev/null || git diff --cached --name-only 2>/dev/null || true)
+    # Capture diff after writer — use precise SHA range if writer committed
+    POST_WRITER_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+    if [[ "$PRE_WRITER_SHA" != "$POST_WRITER_SHA" && "$PRE_WRITER_SHA" != "unknown" ]]; then
+      log "Writer created new commit(s): ${PRE_WRITER_SHA:0:7}..${POST_WRITER_SHA:0:7}"
+      DIFF_CONTENT=$(git diff "${PRE_WRITER_SHA}..${POST_WRITER_SHA}" 2>/dev/null || true)
+      CHANGED_FILES_LIST=$(git diff --name-only --diff-filter=ACMR "${PRE_WRITER_SHA}..${POST_WRITER_SHA}" 2>/dev/null || true)
+    else
+      # Writer didn't commit — fall back to staged then working tree
+      DIFF_CONTENT=$(git diff --cached 2>/dev/null || true)
+      CHANGED_FILES_LIST=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+      if [[ -z "$DIFF_CONTENT" ]]; then
+        DIFF_CONTENT=$(git diff HEAD 2>/dev/null || true)
+        CHANGED_FILES_LIST=$(git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
+      fi
+      if [[ -z "$DIFF_CONTENT" ]]; then
+        # Last resort: use the smart fallback chain
+        DIFF_CONTENT=$(_capture_diff "$WORK_DIR" || true)
+        CHANGED_FILES_LIST=$(_capture_changed_files "$WORK_DIR" || true)
+      fi
+    fi
     REVIEW_CONTEXT=$(build_review_context "$WORK_DIR")
 
     # Update ctx files with fresh content

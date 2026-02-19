@@ -75,11 +75,14 @@ build_review_context() {
   fi
 
   local changed_files
-  changed_files=$(cd "$repo" && git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || \
-                  cd "$repo" && git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null || true)
-
-  if [[ -z "$changed_files" ]]; then
-    changed_files=$(cd "$repo" && git diff --name-only HEAD~1 2>/dev/null || true)
+  if (cd "$repo" && git rev-parse --verify HEAD~1 &>/dev/null); then
+    changed_files=$(cd "$repo" && git diff --name-only --diff-filter=ACMR HEAD~1..HEAD 2>/dev/null || true)
+  else
+    # Initial commit fallback
+    changed_files=$(cd "$repo" && git show HEAD --format="" --diff-filter=ACMR --name-only 2>/dev/null || true)
+    if [[ -z "$changed_files" ]]; then
+      changed_files=$(cd "$repo" && git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
+    fi
   fi
 
   while IFS= read -r file; do
@@ -369,19 +372,25 @@ validate_contract() {
 
 # ── 10. Compute Diff Hash ───────────────────────────────────────────────────
 # SHA-256 of current diff for caching / identical-diff detection.
+# Uses smart fallback chain: HEAD~1..HEAD → show HEAD (initial) → cached
 # Args: $1 = repo path (default: .)
 # Outputs: "sha256:<hash>" to stdout
 compute_diff_hash() {
   local repo="${1:-.}"
-  local hash
+  local diff_output=""
 
-  hash=$(cd "$repo" && git diff HEAD 2>/dev/null | sha256sum | awk '{print $1}')
-
-  if [[ -z "$hash" ]]; then
-    # Fallback: try cached diff
-    hash=$(cd "$repo" && git diff --cached 2>/dev/null | sha256sum | awk '{print $1}')
+  if (cd "$repo" && git rev-parse --verify HEAD~1 &>/dev/null); then
+    diff_output=$(cd "$repo" && git diff HEAD~1..HEAD 2>/dev/null || true)
+  else
+    # Initial commit — no HEAD~1
+    diff_output=$(cd "$repo" && git show HEAD --format="" --diff-filter=ACMR 2>/dev/null || true)
+    if [[ -z "$diff_output" ]]; then
+      diff_output=$(cd "$repo" && git diff --cached 2>/dev/null || true)
+    fi
   fi
 
+  local hash
+  hash=$(echo "$diff_output" | sha256sum | awk '{print $1}')
   echo "sha256:${hash}"
 }
 
