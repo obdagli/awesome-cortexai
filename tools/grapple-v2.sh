@@ -269,7 +269,9 @@ while true; do
     WRITER_PROMPT_FILE=$(make_prompt_file "${SCRIPT_DIR}/grapple-v2/prompts/writer.md.tmpl")
 
     WRITER_EXIT=0
-    timeout 300 opencode run -m "$WRITER_MODEL" < "$WRITER_PROMPT_FILE" > /dev/null 2>&1 || WRITER_EXIT=$?
+    timeout 300 opencode run -m "$WRITER_MODEL" \
+      "Execute the coding task in the attached file. Follow its instructions exactly." \
+      --file "$WRITER_PROMPT_FILE" > /dev/null 2>&1 || WRITER_EXIT=$?
 
     if (( WRITER_EXIT == 124 )); then
       err "Gate 1: Writer timed out (300s)"

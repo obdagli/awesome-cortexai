@@ -61,6 +61,13 @@ fi
 # No hard fails (or all overridden) — run LLM for nuanced verdict
 check_circuit_breaker "coding" || exit 1
 
+# Write gate results to ctx dir for template substitution (awk-based, safe for JSON)
+if [[ -n "${GRAPPLE_CTX_DIR:-}" && -d "${GRAPPLE_CTX_DIR}" ]]; then
+  echo "$GATE2_RESULTS" > "${GRAPPLE_CTX_DIR}/gate2_results.json"
+  echo "$GATE3_RESULTS" > "${GRAPPLE_CTX_DIR}/gate3_results.json"
+  echo "$GATE4_RESULTS" > "${GRAPPLE_CTX_DIR}/gate4_results.json"
+fi
+
 export GATE2_RESULTS GATE3_RESULTS GATE4_RESULTS OVERRIDES
 PROMPT_FILE=$(make_prompt_file "${GATE_DIR}/prompts/judge.md.tmpl")
 

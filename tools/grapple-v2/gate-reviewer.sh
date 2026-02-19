@@ -28,6 +28,17 @@ if [[ -z "$GATE_JSON" ]]; then
   exit 3
 fi
 
+# Normalize output format — handle single finding object or findings array
+if echo "$GATE_JSON" | jq -e '.findings' >/dev/null 2>&1; then
+  : # Already has findings wrapper — good
+elif echo "$GATE_JSON" | jq -e '.category' >/dev/null 2>&1; then
+  # Single finding object — wrap it
+  GATE_JSON=$(echo "$GATE_JSON" | jq '{findings: [.], score: (if .severity == "critical" then 25 elif .severity == "major" then 60 else 80 end), summary: .description, verdict: (if .severity == "critical" then "REJECT" elif .severity == "major" then "REVISE" else "APPROVE" end)}')
+elif echo "$GATE_JSON" | jq -e 'type == "array"' >/dev/null 2>&1; then
+  # Array of findings — wrap it
+  GATE_JSON=$(echo "$GATE_JSON" | jq '{findings: ., score: (100 - ([.[] | if .severity == "critical" then 25 elif .severity == "major" then 10 else 2 end] | add // 0)), summary: "Auto-wrapped findings array", verdict: (if any(.[]; .severity == "critical") then "REJECT" elif any(.[]; .severity == "major") then "REVISE" else "APPROVE" end)}')
+fi
+
 # Check for hard fail
 SCORE=$(echo "$GATE_JSON" | jq '(.score // 0) | floor')
 HAS_CRITICAL=$(echo "$GATE_JSON" | jq '[(.findings // [])[] | select(.severity == "critical")] | length')

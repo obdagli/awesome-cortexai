@@ -242,13 +242,16 @@ make_prompt_file() {
 
   # Replace large vars from ctx files first
   if [[ -n "$ctx" && -d "$ctx" ]]; then
-    for varname in DIFF_CONTENT REVIEW_CONTEXT FILE_TREE; do
-      local fpath="$ctx/${varname,,}.txt"
-      # Convert VAR_NAME to var_name for filename: DIFF_CONTENT -> diff_content
+    for varname in DIFF_CONTENT REVIEW_CONTEXT FILE_TREE GATE2_RESULTS GATE3_RESULTS GATE4_RESULTS; do
+      local fpath=""
+      # Convert VAR_NAME to filename in ctx dir
       case "$varname" in
         DIFF_CONTENT)    fpath="$ctx/diff_content.txt" ;;
         REVIEW_CONTEXT)  fpath="$ctx/review_context.txt" ;;
         FILE_TREE)       fpath="$ctx/file_tree.txt" ;;
+        GATE2_RESULTS)   fpath="$ctx/gate2_results.json" ;;
+        GATE3_RESULTS)   fpath="$ctx/gate3_results.json" ;;
+        GATE4_RESULTS)   fpath="$ctx/gate4_results.json" ;;
       esac
       if [[ -f "$fpath" ]] && grep -q "\${${varname}}" "$tmpfile"; then
         # Use awk index()+substr() for literal string replacement (not regex).
@@ -270,7 +273,7 @@ make_prompt_file() {
   fi
 
   # Replace remaining small vars via envsubst (only small vars are exported)
-  local small_vars='${TASK_DESCRIPTION} ${TASK_TYPE} ${INVOCATION_CONTRACT} ${ACCEPTANCE_CRITERIA} ${CHANGED_FILES_LIST} ${TRUST_PATTERNS_DATA} ${GRAPPLE_ROUND}'
+  local small_vars='${TASK_DESCRIPTION} ${TASK_TYPE} ${INVOCATION_CONTRACT} ${ACCEPTANCE_CRITERIA} ${CHANGED_FILES_LIST} ${TRUST_PATTERNS_DATA} ${GRAPPLE_ROUND} ${OVERRIDES}'
   envsubst "$small_vars" < "$tmpfile" > "${tmpfile}.tmp" && mv "${tmpfile}.tmp" "$tmpfile"
 
   echo "$tmpfile"
@@ -387,7 +390,9 @@ run_gate() {
     log "run_gate($gate_name): attempt $attempt with model=$model, timeout=${gate_timeout}s"
 
     local exit_code=0
-    timeout "$gate_timeout" opencode run -m "$model" --file "$prompt_file" \
+    timeout "$gate_timeout" opencode run -m "$model" \
+      "Execute the review task in the attached file. Follow its instructions exactly and respond with ONLY the JSON object specified." \
+      --file "$prompt_file" \
       > "$output_file" 2>/dev/null || exit_code=$?
 
     # Timeout returns 124
