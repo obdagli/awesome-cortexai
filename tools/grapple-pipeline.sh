@@ -34,6 +34,11 @@ BASELINE_SHA=""
 # ── Logging ──────────────────────────────────────────────────────────────────
 log()  { echo -e "${BLUE}[grapple]${NC} $*" >&2; }
 ok()   { echo -e "${GREEN}[grapple ✓]${NC} $*" >&2; }
+
+if ! command -v timeout &>/dev/null; then
+  log "WARNING: 'timeout' command not found — timeouts will not be enforced"
+  timeout() { shift; "$@"; }  # passthrough shim
+fi
 warn() { echo -e "${YELLOW}[grapple ⚠]${NC} $*" >&2; }
 err()  { echo -e "${RED}[grapple ✗]${NC} $*" >&2; }
 step() { echo -e "${CYAN}[grapple →]${NC} $*" >&2; }
@@ -336,18 +341,23 @@ if $SKIP_WRITER; then
 else
   step "STEP 2: Writer executing task"
 
+  PROMPT_FILE=$(mktemp /tmp/grapple-prompt-XXXXXX.md)
+  printf '%s' "$TASK" > "$PROMPT_FILE"
   WRITER_OUTPUT=$(timeout 600 opencode run \
     --model "$WRITER_MODEL" \
     --variant high \
-    "$TASK" 2>&1) || {
+    --file "$PROMPT_FILE" \
+    "Execute the task described in the attached file." 2>&1) || {
     EXIT=$?
     if [[ $EXIT -eq 124 ]]; then
+      rm -f "$PROMPT_FILE"
       err "Writer timed out after 600s"
       write_trace "ERROR" 4 "Writer timed out"
       exit 4
     fi
     warn "Writer exited with code $EXIT (may still have produced changes)"
   }
+  rm -f "$PROMPT_FILE"
 
   ok "Writer completed"
 fi
@@ -445,7 +455,7 @@ build_review_context() {
   for f in "${REVIEWABLE_FILES[@]}"; do
     if ! git ls-files --error-unmatch "$f" &>/dev/null 2>&1; then
       diff_content+=$'\n'"--- /dev/null"$'\n'"+++ b/$f"$'\n'
-      diff_content+=$(cat "$f" 2>/dev/null | head -500)
+      diff_content+=$(cat "$f" 2>/dev/null | head -500 | head -c 50000)
     fi
   done
   echo "$diff_content"
@@ -522,11 +532,15 @@ VERDICT RULES:
 
 Be thorough. Quality over speed."
 
+  PROMPT_FILE=$(mktemp /tmp/grapple-review-XXXXXX.md)
+  printf '%s' "$REVIEW_PROMPT" > "$PROMPT_FILE"
   REVIEW_OUTPUT=$(timeout 600 opencode run \
     --model "$REVIEWER_MODEL" \
     --variant high \
-    "$REVIEW_PROMPT" 2>&1) || {
+    --file "$PROMPT_FILE" \
+    "Review the code changes described in the attached file." 2>&1) || {
     EXIT=$?
+    rm -f "$PROMPT_FILE"
     if [[ $EXIT -eq 124 ]]; then
       err "Reviewer timed out in round $ROUND"
       write_trace "ERROR" 4 "Reviewer timed out in round $ROUND"
@@ -534,6 +548,7 @@ Be thorough. Quality over speed."
     fi
     warn "Reviewer exited with code $EXIT"
   }
+  rm -f "$PROMPT_FILE"
 
   # Parse review JSON
   REVIEW_JSON=""
@@ -545,6 +560,36 @@ Be thorough. Quality over speed."
   CURRENT_VERDICT=$(echo "$REVIEW_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('verdict','REVISE'))" 2>/dev/null || echo "REVISE")
   CURRENT_CONFIDENCE=$(echo "$REVIEW_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('confidence',50))" 2>/dev/null || echo "50")
   CURRENT_FINDINGS=$(echo "$REVIEW_JSON" | python3 -c "import sys,json; print(json.dumps(json.load(sys.stdin).get('findings',[])))" 2>/dev/null || echo "[]")
+
+  # ── Validate mandatory review dimensions (integration/intent) ──────────
+  INTEGRATION_COUNT=$(echo "$CURRENT_FINDINGS" | python3 -c "
+import sys, json
+findings = json.load(sys.stdin)
+count = sum(1 for f in findings if f.get('category') in ('integration', 'intent'))
+print(count)
+" 2>/dev/null || echo "0")
+  if [[ "$INTEGRATION_COUNT" -eq 0 ]]; then
+    warn "WARNING: Reviewer skipped mandatory integration/intent checks — injecting finding" >&2
+    CURRENT_FINDINGS=$(echo "$CURRENT_FINDINGS" | python3 -c "
+import sys, json
+findings = json.load(sys.stdin)
+findings.append({
+    'category': 'intent',
+    'severity': 'major',
+    'description': 'Reviewer did not perform mandatory integration/intent verification checks',
+    'file': 'N/A',
+    'line': 0
+})
+print(json.dumps(findings))
+")
+    # Update REVIEW_JSON with injected finding
+    REVIEW_JSON=$(echo "$REVIEW_JSON" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+data['findings'] = json.loads('''$CURRENT_FINDINGS''')
+print(json.dumps(data))
+")
+  fi
 
   # Record round trace
   TRACE_ROUNDS+=("{\"round\":$ROUND,\"verdict\":\"$CURRENT_VERDICT\",\"confidence\":$CURRENT_CONFIDENCE,\"review\":$REVIEW_JSON}")
@@ -614,13 +659,17 @@ Reviewer summary: $(echo "$REVIEW_JSON" | python3 -c "import sys,json; print(jso
 
 Fix these issues in the existing code. Do not rewrite from scratch — make targeted fixes."
 
+  PROMPT_FILE=$(mktemp /tmp/grapple-fix-XXXXXX.md)
+  printf '%s' "$FIX_PROMPT" > "$PROMPT_FILE"
   FIX_OUTPUT=$(timeout 600 opencode run \
     --model "$WRITER_MODEL" \
     --variant high \
-    "$FIX_PROMPT" 2>&1) || {
+    --file "$PROMPT_FILE" \
+    "Fix the code issues described in the attached file." 2>&1) || {
     EXIT=$?
     warn "Writer fix exited with code $EXIT"
   }
+  rm -f "$PROMPT_FILE"
 
   ok "Writer fix round $ROUND completed"
 
@@ -635,6 +684,7 @@ Fix these issues in the existing code. Do not rewrite from scratch — make targ
   ok "Lint gate passed after fix"
 
   # Update changed files list
+  CHANGED_FILES=()  # Reset for this round
   while IFS= read -r file; do
     [[ -n "$file" ]] && CHANGED_FILES+=("$file")
   done < <(git diff --name-only HEAD 2>/dev/null; git diff --name-only --cached 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)
@@ -686,13 +736,17 @@ Output a JSON object (inside a \`\`\`json code fence):
 
 You can ONLY output APPROVE or REJECT. No middle ground. Make the call."
 
+    PROMPT_FILE=$(mktemp /tmp/grapple-judge-XXXXXX.md)
+    printf '%s' "$JUDGE_PROMPT" > "$PROMPT_FILE"
     JUDGE_OUTPUT=$(timeout 600 opencode run \
       --model "$JUDGE_MODEL" \
       --variant high \
-      "$JUDGE_PROMPT" 2>&1) || {
+      --file "$PROMPT_FILE" \
+      "Judge the code changes described in the attached file." 2>&1) || {
       EXIT=$?
       warn "Judge exited with code $EXIT"
     }
+    rm -f "$PROMPT_FILE"
 
     JUDGE_JSON=""
     if JUDGE_JSON=$(parse_review_json "$JUDGE_OUTPUT"); then

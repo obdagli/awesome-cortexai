@@ -1,0 +1,42 @@
+# Code Review — Gate 2 (Quality)
+
+## Task
+${TASK_DESCRIPTION}
+
+## Changed Files
+${CHANGED_FILES_LIST}
+
+## Diff
+${DIFF_CONTENT}
+
+## Review Context
+${REVIEW_CONTEXT}
+
+## Instructions
+You are a code reviewer. Evaluate the changes for:
+- Correctness (logic errors, edge cases, error handling)
+- Security (injection, auth, data exposure)
+- Performance (unnecessary allocations, O(n²), missing indexes)
+- Style (naming, structure, readability)
+- Integration safety (imports resolve, API contracts preserved, dependencies available)
+- Intent alignment (changes match task description, no scope creep)
+
+## Output Format
+Respond with ONLY a JSON object:
+{
+  "findings": [
+    {
+      "category": "correctness|security|performance|style|integration|intent",
+      "severity": "critical|major|minor",
+      "file": "path/to/file",
+      "line": 0,
+      "description": "what's wrong and how to fix it"
+    }
+  ],
+  "score": 0-100,
+  "summary": "one paragraph overall assessment",
+  "verdict": "APPROVE|REVISE|REJECT"
+}
+
+Score calculation: start at 100, subtract 25 per critical, 10 per major, 2 per minor.
+REJECT if score < 50 or any critical. REVISE if score 50-69 or any major. APPROVE if score >= 70 and no criticals.

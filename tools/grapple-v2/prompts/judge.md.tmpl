@@ -1,0 +1,52 @@
+# Final Verdict — Gate 5 (Judge)
+
+## Task
+${TASK_DESCRIPTION}
+
+## Gate 2 (Reviewer) Results
+${GATE2_RESULTS}
+
+## Gate 3 (Integrator) Results
+${GATE3_RESULTS}
+
+## Gate 4 (Intent Auditor) Results
+${GATE4_RESULTS}
+
+## Overrides Applied
+${OVERRIDES}
+
+## Instructions
+You are the final judge. Synthesize all gate results into a composite verdict.
+
+### Hard Fail Conditions (non-negotiable, auto-REJECT):
+- Gate 2 score < 50 or any critical finding
+- Gate 3 has ANY unwired symbol (without override)
+- Gate 4 has ANY unmapped acceptance criterion (structured tasks only)
+- Gate 4 flags unjustified scope violation
+
+### Soft Conditions (can pass with warnings):
+- Gate 2 score 50-69 with only major findings → REVISE
+- Gate 3 has indirect invocation with trust pattern match → OK with note
+- Gate 4 has minor scope additions that are justified → OK with note
+
+### Override Evaluation:
+- Review each override for legitimacy
+- Flag suspicious overrides (e.g., overriding critical findings, overriding multiple symbols)
+- Overrides don't automatically make things pass — you evaluate if the reason is sound
+
+## Output Format
+Respond with ONLY a JSON object:
+{
+  "verdict": "APPROVE|REVISE|REJECT",
+  "composite_score": 0-100,
+  "gate_scores": {
+    "reviewer": 0-100,
+    "integrator": 0-100,
+    "intent": 0-100
+  },
+  "hard_fails": ["list of hard fail reasons, empty if none"],
+  "warnings": ["list of warnings"],
+  "required_actions": ["list of required changes before approval"],
+  "override_assessment": "assessment of any overrides applied",
+  "summary": "final assessment paragraph"
+}

@@ -16,6 +16,7 @@ VIOLATIONS = [
     ("tee_write", re.compile(r'tee\s+(-a\s+)?\S+\.(ts|js|py|tsx|jsx|json|yaml|yml|sh|css|html)')),
     ("sed_inline", re.compile(r'sed\s+-i')),
     ("printf_redirect", re.compile(r'printf\s+.*>\s+\S+\.(ts|js|py|tsx|jsx|json|yaml|yml|sh|css|html)')),
+    ("python_inline", re.compile(r'python3?\s+-c\s+[\'"].*(?:open\s*\(.*["\']w|\.write\(|os\.system|subprocess|exec\s*\()')),
 ]
 
 OPENCODE_DISPATCH = re.compile(r'opencode-dispatch\.sh|opencode\s+run')
@@ -25,6 +26,8 @@ ALLOWLIST = [
     re.compile(r'opencode-dispatch\.sh'),
     re.compile(r'opencode\s+run'),
     re.compile(r'^\s*#'),  # shell comments
+    re.compile(r'grapple'),
+    re.compile(r'lib\.sh'),
 ]
 
 LOG_DIRS = [
@@ -104,24 +107,40 @@ def scan_opencode_sessions(max_age_hours: int = 24) -> tuple[list[dict], int, in
     sessions_scanned = 0
     dispatch_count = 0
 
-    lines = result.stdout.splitlines()
-    for line in lines:
-        parts = line.strip().split()
-        if not parts:
-            continue
-        session_id = parts[0]
+    # Parse JSON output from `opencode session list --json`
+    raw = result.stdout.strip()
+    if not raw:
+        return [], 0, 0
 
-        # Try to extract timestamp from session listing to filter by age
-        session_ts = None
-        for part in parts[1:]:
+    try:
+        sessions_data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return [], 0, 0
+
+    # Normalise: accept both a list of sessions and a dict with a "sessions" key
+    if isinstance(sessions_data, dict):
+        sessions_list = sessions_data.get("sessions", [])
+    elif isinstance(sessions_data, list):
+        sessions_list = sessions_data
+    else:
+        return [], 0, 0
+
+    for entry in sessions_list:
+        if not isinstance(entry, dict):
+            continue
+        session_id = entry.get("id") or entry.get("session_id") or entry.get("name")
+        if not session_id:
+            continue
+        session_id = str(session_id)
+
+        # Filter by age if a timestamp field is present
+        session_ts = entry.get("timestamp") or entry.get("created_at") or entry.get("ts")
+        if session_ts is not None:
             try:
-                session_ts = float(part)
-                break
-            except ValueError:
-                continue
-
-        if session_ts is not None and session_ts < cutoff:
-            continue
+                if float(session_ts) < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass
 
         try:
             export = subprocess.run(

@@ -9,6 +9,7 @@
 #   opencode-dispatch.sh full --template full-code "add JWT validation" --dir /home/brk/myproject
 #   opencode-dispatch.sh full --no-grapple "implement auth without review"
 #   opencode-dispatch.sh full --task "implement auth" --dir /home/brk/myproject
+#   opencode-dispatch.sh full --contract "Entry point: src/api/auth. Trigger: user request. Proof: import check." "add JWT"
 
 set -euo pipefail
 
@@ -45,6 +46,7 @@ Options:
   --model <model>     Override model (provider/model format)
   --session <id>      Continue existing session
   --timeout <secs>    Override timeout (default: quick=120, full=600)
+  --contract <text>   Invocation contract for grapple (entry_point, trigger, proof_method)
   --grapple           Explicitly enable grapple (default for full profile)
   --no-grapple        Skip grapple review (full profile only, overrides default)
   --dry-run           Print command without executing
@@ -83,6 +85,7 @@ TEMPLATE=""
 DIR=""
 SESSION=""
 DRY_RUN=false
+CONTRACT=""
 # Full profile: Grapple on by default. Quick profile: always off (overridden below).
 GRAPPLE=true
 MESSAGE_PARTS=()
@@ -94,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --model)     MODEL="$2"; shift 2 ;;
     --session)   SESSION="$2"; shift 2 ;;
     --timeout)   TIMEOUT="$2"; shift 2 ;;
+    --contract)  CONTRACT="$2"; shift 2 ;;
     --grapple)   GRAPPLE=true; shift ;;
     --no-grapple) GRAPPLE=false; shift ;;
     --dry-run)   DRY_RUN=true; shift ;;
@@ -112,7 +116,7 @@ _infer_category() {
     full-code|full-review) echo "coding" ;;
     quick-search) echo "search" ;;
     *) 
-      if echo "$msg" | grep -qiE 'search|find|lookup|brave'; then echo "search"
+      if echo "$msg" | grep -qiE 'search|lookup|brave|web.?search'; then echo "search"
       elif echo "$msg" | grep -qiE 'image|video|audio|render|generate.*media'; then echo "media"
       elif echo "$msg" | grep -qiE 'code|implement|fix|refactor|build|test|review'; then echo "coding"
       else echo "general"
@@ -127,12 +131,13 @@ if ! cb_check "$DISPATCH_CATEGORY"; then
   exit 10
 fi
 
-# ── Compliance Gate ──────────────────────────────────────────────────────────
-if ! python3 "${SCRIPT_DIR}/check-opencode-compliance.py" --gate 2>/dev/null; then
-  log "WARNING: compliance violations detected in recent worker logs"
-  log "Run: python3 tools/check-opencode-compliance.py for details"
-  # Non-blocking warning — log but don't abort (violations are in PAST workers, not this one)
-fi
+# ── Compliance Gate (Enforcing) ──────────────────────────────────────────────
+COMPLIANCE_OUTPUT=$(python3 "${SCRIPT_DIR}/check-opencode-compliance.py" --gate 2>&1) || {
+  log "BLOCKED: compliance violations detected in recent worker logs"
+  log "$COMPLIANCE_OUTPUT"
+  log "Fix violations before dispatching new work. Run: python3 tools/check-opencode-compliance.py"
+  exit 11
+}
 
 # ── Grapple Pipeline Routing ─────────────────────────────────────────────────
 
@@ -142,15 +147,21 @@ if [[ "$PROFILE" == "quick" ]]; then
 fi
 
 if $GRAPPLE; then
-    GRAPPLE_SCRIPT="${SCRIPT_DIR}/grapple-pipeline.sh"
+    GRAPPLE_SCRIPT="${SCRIPT_DIR}/grapple-v2.sh"
     if [[ ! -x "$GRAPPLE_SCRIPT" ]]; then
-      log "Error: grapple-pipeline.sh not found or not executable at $GRAPPLE_SCRIPT"
+      log "Error: grapple-v2.sh not found or not executable at $GRAPPLE_SCRIPT"
       exit 4
     fi
 
     GRAPPLE_ARGS=(--task "${MESSAGE_PARTS[*]}")
-    [[ -n "$DIR" ]] && GRAPPLE_ARGS+=(--repo "$DIR")
-    [[ -n "$MODEL" && "$MODEL" != "${FULL_OPTS[model]}" ]] && GRAPPLE_ARGS+=(--writer-model "$MODEL")
+    [[ -n "$DIR" ]] && GRAPPLE_ARGS+=(--dir "$DIR")
+    # Pass contract to grapple-v2.sh; if none provided, build a default from task context
+    if [[ -n "$CONTRACT" ]]; then
+      GRAPPLE_ARGS+=(--contract "$CONTRACT")
+    else
+      _DEFAULT_CONTRACT="Entry point: see task description. Trigger: opencode-dispatch.sh full-profile run. Proof: verify changed files are imported/called from existing code."
+      GRAPPLE_ARGS+=(--contract "$_DEFAULT_CONTRACT")
+    fi
     $DRY_RUN && GRAPPLE_ARGS+=(--dry-run)
 
     log "Routing to grapple pipeline..."

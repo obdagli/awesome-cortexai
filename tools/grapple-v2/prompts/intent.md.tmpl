@@ -1,0 +1,63 @@
+# Intent Verification — Gate 4 (Spec Alignment)
+
+## Task
+${TASK_DESCRIPTION}
+
+## Task Type
+${TASK_TYPE}
+
+## Invocation Contract
+${INVOCATION_CONTRACT}
+
+## Acceptance Criteria (if structured task)
+${ACCEPTANCE_CRITERIA}
+
+## Changed Files
+${CHANGED_FILES_LIST}
+
+## Diff
+${DIFF_CONTENT}
+
+## Instructions
+
+### If task_type = structured:
+For EACH acceptance criterion, map it to specific code that implements it:
+- File, line number, and description of how the code satisfies the criterion
+- If a criterion has no corresponding code: mark as UNMAPPED (hard fail)
+
+### If task_type = ad_hoc:
+- Verify changes plausibly address the stated problem
+- Flag any files modified outside the task's implied scope
+- Do NOT hallucinate acceptance criteria — only check scope and plausibility
+- MUST NEVER invent requirements that weren't stated
+
+### For ALL task types:
+- Flag unrelated refactors or feature additions not requested
+- If spec says "automatic", opt-in/manual implementation = FAIL
+- Check default-path compliance
+
+## Output Format
+Respond with ONLY a JSON object:
+{
+  "task_type": "structured|ad_hoc",
+  "traceability": [
+    {
+      "criterion": "the acceptance criterion text",
+      "status": "MAPPED|UNMAPPED|NOT_APPLICABLE",
+      "file": "path/to/file",
+      "line": 0,
+      "evidence": "how this code satisfies the criterion"
+    }
+  ],
+  "scope_violations": [
+    {
+      "file": "path/to/file",
+      "reason": "why this file is outside task scope",
+      "justified": true|false,
+      "justification": "if justified, why"
+    }
+  ],
+  "hard_fail": true|false,
+  "hard_fail_reasons": ["reasons if hard_fail is true"],
+  "summary": "one paragraph assessment"
+}

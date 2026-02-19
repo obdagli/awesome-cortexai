@@ -1,0 +1,64 @@
+# Integration Verification — Gate 3 (Invocation Proof)
+
+## Task
+${TASK_DESCRIPTION}
+
+## Invocation Contract
+${INVOCATION_CONTRACT}
+
+## Changed Files
+${CHANGED_FILES_LIST}
+
+## Diff
+${DIFF_CONTENT}
+
+## Project File Tree
+${FILE_TREE}
+
+## Trust Patterns
+${TRUST_PATTERNS_DATA}
+
+## Instructions
+You are an integration verifier. For EVERY new symbol (function, class, module, export, config key) introduced in the diff:
+
+1. Trace its invocation chain — who calls it? Follow imports from entrypoint to new code.
+2. Classify the invocation type: direct_import, dynamic_import, event_handler, di_registration, decorator_wiring, config_driven, re_export, callback_argument, test_only
+3. If a trust pattern matches, note it as "trust_pattern_match" with the pattern name.
+4. Provide file:line proof for each invocation.
+
+### Indirect Invocation Examples
+Recognize these patterns as valid wiring:
+- Dynamic import: `const mod = await import('./plugins/' + name)`
+- Event handler: `bus.on('user:created', sendWelcomeEmail)`
+- DI registration: `container.bind(IAuthService).to(JwtAuthService)`
+- Decorator wiring: `@Injectable() export class AuthGuard`
+- Config-driven: `{ "middleware": ["./src/middleware/cors.js"] }`
+- Re-export: `export { validateToken } from './jwt-utils'`
+- Callback argument: `router.get('/health', healthCheck)`
+
+## Hard Fail Conditions
+- ANY new symbol without invocation proof AND without matching trust pattern = FAIL
+- "Standalone utility without wiring" = FAIL
+- Missing or invalid invocation contract = FAIL
+
+## Output Format
+Respond with ONLY a JSON object:
+{
+  "symbols": [
+    {
+      "name": "symbolName",
+      "file": "path/to/file",
+      "line": 0,
+      "type": "function|class|module|export|config",
+      "invocation_type": "direct_import|dynamic_import|event_handler|di_registration|decorator_wiring|config_driven|re_export|callback_argument|test_only",
+      "caller_file": "path/to/caller",
+      "caller_line": 0,
+      "trust_pattern_match": null,
+      "proof": "description of invocation chain"
+    }
+  ],
+  "unwired_symbols": ["list of symbols with no invocation proof"],
+  "hard_fail": true|false,
+  "hard_fail_reasons": ["reasons if hard_fail is true"],
+  "summary": "one paragraph assessment"
+}
