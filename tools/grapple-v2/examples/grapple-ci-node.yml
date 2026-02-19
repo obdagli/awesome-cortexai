@@ -1,0 +1,23 @@
+# .grapple-ci.yml — Node.js project example
+# Place this in your project root.
+
+checks:
+  - name: lint
+    command: npm run lint
+    timeout: 60
+    required: true
+
+  - name: typecheck
+    command: npx tsc --noEmit
+    timeout: 90
+    required: true
+
+  - name: test
+    command: npm test
+    timeout: 120
+    required: true
+
+  - name: build
+    command: npm run build
+    timeout: 120
+    required: false

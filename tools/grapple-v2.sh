@@ -321,6 +321,58 @@ while true; do
     CURRENT_DIFF_HASH=$(compute_diff_hash "$WORK_DIR")
   fi
 
+  # ── Gate 0: Verify (test/lint/build) ────────────────────────────────────
+  if ! _gate_skipped 0; then
+    log "Gate 0: Running verify..."
+    GATE0_OUTPUT_FILE=$(mktemp /tmp/grapple-gate0-XXXXXX.json)
+    _GRAPPLE_TEMPS+=("$GATE0_OUTPUT_FILE")
+
+    export GRAPPLE_RUNNING=1
+    GATE0_EXIT=0
+    WORK_DIR="$WORK_DIR" bash "${SCRIPT_DIR}/grapple-v2/gate-verify.sh" > "$GATE0_OUTPUT_FILE" 2>"${TRACE_DIR}/gate0.stderr.log" || GATE0_EXIT=$?
+
+    if [[ -s "$GATE0_OUTPUT_FILE" ]] && jq -e '.' "$GATE0_OUTPUT_FILE" >/dev/null 2>&1; then
+      GATE0_VERDICT=$(jq -r '.verdict // "SKIP"' "$GATE0_OUTPUT_FILE")
+      GATE0_HARD_FAIL=$(jq -r '.hard_fail // false' "$GATE0_OUTPUT_FILE")
+    else
+      GATE0_VERDICT="FAIL"
+      GATE0_HARD_FAIL=true
+      echo '{"checks":[],"verdict":"FAIL","summary":"Gate 0 failed to produce valid output","hard_fail":true}' > "$GATE0_OUTPUT_FILE"
+    fi
+
+    if [[ "$GATE0_VERDICT" == "PASS" ]]; then
+      ok "Gate 0: PASS"
+    elif [[ "$GATE0_VERDICT" == "SKIP" ]]; then
+      log "Gate 0: SKIP (no verify config)"
+    elif [[ "$GATE0_HARD_FAIL" == "true" ]]; then
+      err "Gate 0: FAIL — verify checks failed"
+      if (( ROUND >= MAX_ROUNDS )); then
+        err "Gate 0: Max rounds reached with verify failures — skipping LLM gates"
+        # Record gate0 in round trace and break
+        ROUND_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        ROUND_ENTRY=$(jq -n \
+          --argjson round "$ROUND" \
+          --arg timestamp "$ROUND_TIMESTAMP" \
+          --argjson gate0 "$(jq '.' "$GATE0_OUTPUT_FILE" 2>/dev/null || echo '{}')" \
+          --arg diff_hash "${CURRENT_DIFF_HASH:-$INITIAL_DIFF_HASH}" \
+          '{round: $round, timestamp: $timestamp, gate0: $gate0, diff_hash: $diff_hash}')
+        ROUNDS_JSON=$(echo "$ROUNDS_JSON" | jq --argjson entry "$ROUND_ENTRY" '. + [$entry]')
+        FINAL_VERDICT="REJECT"
+        break
+      fi
+      # Feed verify errors back to writer for fix — continue loop
+      GATE0_ERRORS=$(jq -r '[.checks[] | select(.passed == false)] | map(.name + ": " + .output) | join("\n---\n")' "$GATE0_OUTPUT_FILE" 2>/dev/null || echo "verify failed")
+      warn "Gate 0: Feeding verify errors back to writer for round $((ROUND + 1))"
+      TASK_DESCRIPTION="${TASK_DESCRIPTION}
+
+[VERIFY FAILURES — FIX THESE]:
+${GATE0_ERRORS}"
+      continue  # Skip LLM gates, go to next round (writer will fix)
+    fi
+  else
+    log "Gate 0: Skipped"
+  fi
+
   # ── Incremental context for round 2+ ────────────────────────────────────
   if (( ROUND > 1 )); then
     log "Round $ROUND: using incremental review context"
@@ -439,6 +491,7 @@ while true; do
   ROUND_ENTRY=$(jq -n \
     --argjson round "$ROUND" \
     --arg timestamp "$ROUND_TIMESTAMP" \
+    --argjson gate0 "$(jq '.' "${GATE0_OUTPUT_FILE:-/dev/null}" 2>/dev/null || echo '{"verdict":"SKIP"}')" \
     --argjson gate2 "$(jq '.' "$GATE2_OUTPUT_FILE" 2>/dev/null || echo '{}')" \
     --argjson gate3 "$(jq '.' "$GATE3_OUTPUT_FILE" 2>/dev/null || echo '{}')" \
     --argjson gate4 "$(jq '.' "$GATE4_OUTPUT_FILE" 2>/dev/null || echo '{}')" \
@@ -447,6 +500,7 @@ while true; do
     '{
       round: $round,
       timestamp: $timestamp,
+      gate0: $gate0,
       gate2: $gate2,
       gate3: $gate3,
       gate4: $gate4,

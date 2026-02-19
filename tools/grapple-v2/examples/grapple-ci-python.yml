@@ -1,0 +1,18 @@
+# .grapple-ci.yml — Python project example
+# Place this in your project root.
+
+checks:
+  - name: lint
+    command: ruff check .
+    timeout: 60
+    required: true
+
+  - name: typecheck
+    command: mypy --ignore-missing-imports .
+    timeout: 90
+    required: false
+
+  - name: test
+    command: pytest --tb=short -q
+    timeout: 120
+    required: true
