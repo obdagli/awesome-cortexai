@@ -1,441 +1,542 @@
 #!/usr/bin/env python3
-"""Provider Router — real-time quota awareness for all 7 providers.
+"""Dynamic provider router with real-time quota awareness.
 
 Commands:
-    status          Show all providers with health, latency, models, quota hints
-    select MODEL    Pick best healthy provider for a model
-    check-health    Run live health checks and update provider-health.json
-
-Reads:
-    provider-config.json   — provider definitions (urls, keys, models, priority)
-    provider-health.json   — cached health state (written by check-health)
-    ~/.openclaw/.env       — env vars for API keys (fallback)
-
-Output: human-readable tables by default, --json for machine consumption.
+  python3 provider-router.py status
+  python3 provider-router.py select <tier>
+  python3 provider-router.py check-health
 """
+
+from __future__ import annotations
+
 import json
 import os
+import re
 import sys
-import time
-import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-try:
-    import requests
-except ImportError:
-    print("ERROR: requests not installed. Run: pip3 install requests", file=sys.stderr)
-    sys.exit(1)
+import requests
 
-TOOLS_DIR = Path(__file__).resolve().parent
-CONFIG_FILE = TOOLS_DIR / "provider-config.json"
-HEALTH_FILE = TOOLS_DIR / "provider-health.json"
-ENV_FILE = Path.home() / ".openclaw" / ".env"
-
-# Quota hints per provider (daily request estimates from AGENTS.md + provider_registry.py)
-QUOTA_HINTS: Dict[str, Dict[str, Any]] = {
-    "anthropic": {
-        "daily_limit": None,
-        "note": "Local proxy (kiro :4040), no hard daily cap",
+PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "claude.gg": {
+        "usage_url": "https://claude.gg/api/me?key={key}",
+        "env_key": "APP_CLAUDE_KEY",
+        "daily_limit": 2500,
+        "hourly_limit": None,
+        "models": ["claude-sonnet-4-5", "claude-opus-4-5"],
+        "tier": "claude-standard",
     },
     "app.claude.gg": {
-        "daily_limit": None,
-        "note": "OAuth subscription, soft rate limits apply",
-    },
-    "claude.gg": {
-        "daily_limit": None,
-        "note": "GateAI relay, shared quota with GATE_API_KEY",
-    },
-    "beta.claude.gg": {
-        "daily_limit": None,
-        "note": "GateAI relay (beta), shared quota with GATE_API_KEY",
-    },
-    "codex.claude.gg": {
-        "daily_limit": 2500,
-        "note": "Codex GPT-5.x, ~2500 req/day via GateAI relay",
-    },
-    "cliproxyapi": {
-        "daily_limit": None,
-        "note": "Local CLIProxyAPI (:8317), round-robin multi-account, quota per upstream",
+        "usage_url": "https://app.claude.gg/api/me?key={key}",
+        "env_key": "APP_CLAUDE_KEY",
+        "daily_limit": 1000,
+        "hourly_limit": 450,
+        "models": [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+        ],
+        "tier": "claude-premium",
     },
     "beta.vertexapis.com": {
+        "usage_url": "https://beta.vertexapis.com/api/me?key={key}",
+        "env_key": "VERTEX_API_KEY",
         "daily_limit": 3500,
-        "note": "Vertex Gemini native, ~3500 req/day free tier",
+        "hourly_limit": 450,
+        "models": ["gemini-2.5-flash", "gemini-3-pro"],
+        "tier": "gemini",
+    },
+    "img.claude.gg": {
+        "usage_url": "https://img.claude.gg/api/me",
+        "auth_header": True,
+        "env_key": "APP_CLAUDE_KEY",
+        "daily_limit": 1000,
+        "hourly_limit": 400,
+        "models": ["image-generation"],
+        "tier": "image",
+    },
+    "codex.claude.gg": {
+        "usage_url": "https://codex.claude.gg/api/me?key={key}",
+        "env_key": "APP_CLAUDE_KEY",
+        "daily_limit": 5000,
+        "hourly_limit": 5000,
+        "models": ["gpt-5.2-codex", "gpt-5.3-codex"],
+        "tier": "codex",
+    },
+    "perplexity.claude.gg": {
+        "usage_url": "https://perplexity.claude.gg/api/me",
+        "auth_header": True,
+        "env_key": "APP_CLAUDE_KEY",
+        "daily_limit": 3000,
+        "hourly_limit": 700,
+        "models": ["perplexity-search"],
+        "tier": "search",
+    },
+    "gateai": {
+        "usage_url": "https://api.gateai.app/api/me?key={key}",
+        "env_key": "GATE_API_KEY",
+        "daily_limit": 150,
+        "hourly_limit": None,
+        "models": ["gpt-5.2-codex", "gpt-5.3-codex"],
+        "tier": "codex-fallback",
     },
 }
 
+STATUS_STREAM_URL = "https://cortexai.com.tr/api/status/stream"
+TIMEOUT_SECONDS = 12
 
-def load_config() -> Dict[str, Any]:
-    with open(CONFIG_FILE) as f:
-        return json.load(f)
-
-
-def load_env() -> Dict[str, str]:
-    """Load env vars from os.environ + ~/.openclaw/.env fallback."""
-    env = dict(os.environ)
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
+# Fallbacks by tier family. Primary key is requested tier.
+TIER_FALLBACKS: Dict[str, List[str]] = {
+    "codex": ["codex-fallback"],
+    "codex-fallback": ["codex"],
+    "claude-premium": ["claude-standard"],
+    "claude-standard": ["claude-premium"],
+}
 
 
-def resolve_key(cfg: Dict[str, Any], env: Dict[str, str]) -> Optional[str]:
-    """Resolve API key from config entry."""
-    if "key_literal" in cfg:
-        return cfg["key_literal"]
-    key_env = cfg.get("key_env")
-    if key_env:
-        return env.get(key_env) or None
+@dataclass
+class ProviderUsage:
+    provider: str
+    tier: str
+    model: str
+    healthy: bool
+    used_daily: Optional[int]
+    remaining_daily: Optional[int]
+    remaining_pct: Optional[int]
+    error: Optional[str] = None
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def env_value(name: str) -> Optional[str]:
+    v = os.getenv(name)
+    if not v:
+        return None
+    return v.strip()
+
+
+def _safe_int(v: Any) -> Optional[int]:
+    if v is None:
+        return None
+    try:
+        if isinstance(v, bool):
+            return None
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _iter_pairs(obj: Any, prefix: str = "") -> Iterable[Tuple[str, Any]]:
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            yield p.lower(), v
+            yield from _iter_pairs(v, p)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            p = f"{prefix}[{i}]"
+            yield from _iter_pairs(v, p)
+
+
+def extract_daily_used(payload: Any, daily_limit: int) -> Optional[int]:
+    """Best-effort parser for daily usage from heterogeneous /api/me payloads."""
+    if not isinstance(payload, (dict, list)):
+        return None
+
+    exact_used_keys = {
+        "daily_used",
+        "dailyusage",
+        "daily_usage",
+        "used_today",
+        "requests_today",
+        "today_used",
+    }
+    exact_remaining_keys = {
+        "daily_remaining",
+        "remaining_today",
+        "requests_remaining",
+        "today_remaining",
+    }
+
+    best_used: Optional[int] = None
+    best_remaining: Optional[int] = None
+
+    for key, value in _iter_pairs(payload):
+        val = _safe_int(value)
+        if val is None:
+            continue
+
+        token = re.sub(r"[^a-z0-9_]", "", key)
+
+        if token in exact_used_keys:
+            return max(0, val)
+
+        if token in exact_remaining_keys:
+            best_remaining = val
+            continue
+
+        if "daily" in token and any(w in token for w in ("used", "usage", "count", "request", "spent")):
+            best_used = val if best_used is None else max(best_used, val)
+            continue
+
+        if "today" in token and any(w in token for w in ("used", "usage", "count", "request", "spent")):
+            best_used = val if best_used is None else max(best_used, val)
+            continue
+
+        if any(w in token for w in ("remaining", "left")) and any(w in token for w in ("daily", "today", "request")):
+            best_remaining = val if best_remaining is None else max(best_remaining, val)
+
+    if best_used is not None:
+        return max(0, best_used)
+
+    if best_remaining is not None:
+        return max(0, daily_limit - best_remaining)
+
     return None
 
 
-def build_headers(cfg: Dict[str, Any], env: Dict[str, str]) -> Dict[str, str]:
-    """Build request headers with proper auth for a provider."""
-    headers: Dict[str, str] = {}
-    key = resolve_key(cfg, env)
+def fetch_usage(provider: str, cfg: Dict[str, Any]) -> ProviderUsage:
+    env_key = cfg["env_key"]
+    key = env_value(env_key)
+    model = cfg["models"][0]
+    tier = cfg["tier"]
+    daily_limit = int(cfg["daily_limit"])
+
     if not key:
-        return headers
-    header_name = cfg.get("key_header", "Authorization")
-    if header_name == "Authorization":
+        return ProviderUsage(
+            provider=provider,
+            tier=tier,
+            model=model,
+            healthy=False,
+            used_daily=None,
+            remaining_daily=None,
+            remaining_pct=None,
+            error=f"missing ${env_key}",
+        )
+
+    usage_url = cfg["usage_url"]
+    headers: Dict[str, str] = {"Accept": "application/json"}
+
+    if cfg.get("auth_header"):
+        url = usage_url
         headers["Authorization"] = f"Bearer {key}"
     else:
-        headers[header_name] = key
-    return headers
+        url = usage_url.format(key=key)
 
-
-def load_health(max_age: int) -> Optional[Dict[str, Any]]:
-    """Load cached health data, return None if stale or missing."""
-    if not HEALTH_FILE.exists():
-        return None
     try:
-        data = json.loads(HEALTH_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-    updated = data.get("updated_at", "")
-    if updated:
-        try:
-            ts = datetime.fromisoformat(updated)
-            age = (datetime.now(timezone.utc) - ts).total_seconds()
-            if age > max_age:
-                return None
-        except (ValueError, TypeError):
-            pass
-    return data
+        resp = requests.get(url, headers=headers, timeout=TIMEOUT_SECONDS)
+    except requests.RequestException as e:
+        return ProviderUsage(
+            provider=provider,
+            tier=tier,
+            model=model,
+            healthy=False,
+            used_daily=None,
+            remaining_daily=None,
+            remaining_pct=None,
+            error=str(e),
+        )
 
+    if resp.status_code != 200:
+        return ProviderUsage(
+            provider=provider,
+            tier=tier,
+            model=model,
+            healthy=False,
+            used_daily=None,
+            remaining_daily=None,
+            remaining_pct=None,
+            error=f"http {resp.status_code}",
+        )
 
-def check_one_provider(
-    name: str, cfg: Dict[str, Any], env: Dict[str, str]
-) -> Dict[str, Any]:
-    """Run a live health check against one provider. Returns result dict."""
-    url = cfg["url"]
-    key = resolve_key(cfg, env)
-    if not key and cfg.get("key_env"):
-        return {
-            "healthy": False,
-            "latency_ms": 0,
-            "status_code": 0,
-            "error": f"missing env var {cfg['key_env']}",
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-    headers = build_headers(cfg, env)
     try:
-        start = time.monotonic()
-        resp = requests.get(url, headers=headers, timeout=5)
-        latency = int((time.monotonic() - start) * 1000)
-        code = resp.status_code
-        error = None
-        if code in (401, 403):
-            error = "auth_failed"
-        elif code >= 500:
-            error = f"server_error_{code}"
-        elif code != 200:
-            error = f"http_{code}"
-        return {
-            "healthy": code == 200,
-            "latency_ms": latency,
-            "status_code": code,
-            "error": error,
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
-    except requests.Timeout:
-        return {
-            "healthy": False,
-            "latency_ms": 5000,
-            "status_code": 0,
-            "error": "timeout",
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
-    except requests.ConnectionError:
-        return {
-            "healthy": False,
-            "latency_ms": 0,
-            "status_code": 0,
-            "error": "connection_refused",
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
-    except Exception as e:
-        return {
-            "healthy": False,
-            "latency_ms": 0,
-            "status_code": 0,
-            "error": str(e)[:120],
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "checked_at": datetime.now(timezone.utc).isoformat(),
-        }
+        payload = resp.json()
+    except ValueError:
+        return ProviderUsage(
+            provider=provider,
+            tier=tier,
+            model=model,
+            healthy=False,
+            used_daily=None,
+            remaining_daily=None,
+            remaining_pct=None,
+            error="invalid json",
+        )
+
+    used_daily = extract_daily_used(payload, daily_limit)
+    if used_daily is None:
+        # Endpoint is alive; usage shape is unknown.
+        return ProviderUsage(
+            provider=provider,
+            tier=tier,
+            model=model,
+            healthy=True,
+            used_daily=None,
+            remaining_daily=None,
+            remaining_pct=None,
+            error="usage field not found",
+        )
+
+    used_daily = max(0, min(daily_limit, used_daily))
+    remaining_daily = max(0, daily_limit - used_daily)
+    remaining_pct = int(round((remaining_daily / daily_limit) * 100))
+
+    return ProviderUsage(
+        provider=provider,
+        tier=tier,
+        model=model,
+        healthy=True,
+        used_daily=used_daily,
+        remaining_daily=remaining_daily,
+        remaining_pct=remaining_pct,
+    )
 
 
-# ── Commands ──────────────────────────────────────────────────────────
+def all_statuses() -> List[ProviderUsage]:
+    results = [fetch_usage(name, cfg) for name, cfg in PROVIDERS.items()]
+    # Deterministic order close to requested sample
+    order = [
+        "codex.claude.gg",
+        "app.claude.gg",
+        "beta.vertexapis.com",
+        "img.claude.gg",
+        "claude.gg",
+        "perplexity.claude.gg",
+        "gateai",
+    ]
+    rank = {name: i for i, name in enumerate(order)}
+    results.sort(key=lambda x: rank.get(x.provider, 999))
+    return results
 
 
-def cmd_status(config: Dict[str, Any], env: Dict[str, str], as_json: bool) -> int:
-    """Show all providers with health, latency, models, and quota hints."""
-    max_age = config.get("staleness_max_seconds", 600)
-    health = load_health(max_age)
-    providers = config.get("providers", {})
-
-    rows: List[Dict[str, Any]] = []
-    for name, cfg in providers.items():
-        has_key = bool(resolve_key(cfg, env))
-        h = (health or {}).get("providers", {}).get(name, {})
-        quota = QUOTA_HINTS.get(name, {})
-        row = {
-            "provider": name,
-            "healthy": h.get("healthy", "?"),
-            "latency_ms": h.get("latency_ms", "?"),
-            "status_code": h.get("status_code", "?"),
-            "error": h.get("error"),
-            "models": cfg.get("models", []),
-            "priority": cfg.get("priority", 99),
-            "key_present": has_key,
-            "daily_limit": quota.get("daily_limit"),
-            "quota_note": quota.get("note", ""),
-        }
-        rows.append(row)
-
-    if as_json:
-        stale = health is None
-        updated = (health or {}).get("updated_at")
-        print(json.dumps({"stale": stale, "updated_at": updated, "providers": rows}, indent=2, default=str))
-        return 0
+def _display_name(provider: str) -> str:
+    if provider == "perplexity.claude.gg":
+        return "perplexity.gg"
+    if provider == "beta.vertexapis.com":
+        return "beta.vertexapis"
+    return provider
 
 
-    health_age = ""
-    if health and health.get("updated_at"):
-        try:
-            ts = datetime.fromisoformat(health["updated_at"])
-            age_s = int((datetime.now(timezone.utc) - ts).total_seconds())
-            health_age = f" (age: {age_s}s)"
-        except (ValueError, TypeError):
-            pass
-    stale_tag = " [STALE]" if health is None else ""
-    print(f"Provider Status{stale_tag}{health_age}")
-    print("=" * 100)
-    fmt = "{:<22} {:>5} {:>6} {:>4} {:>3} {:>7}  {}"
-    print(fmt.format("PROVIDER", "HLTHY", "LAT ms", "HTTP", "PRI", "KEY", "MODELS"))
-    print("-" * 100)
-    for r in rows:
-        healthy_str = "✅" if r["healthy"] is True else ("❌" if r["healthy"] is False else "?")
-        key_str = "✓" if r["key_present"] else "✗"
-        lat = str(r["latency_ms"]) if r["latency_ms"] != "?" else "?"
-        code = str(r["status_code"]) if r["status_code"] != "?" else "?"
-        models = ", ".join(r["models"][:3])
-        if len(r["models"]) > 3:
-            models += f" (+{len(r['models']) - 3})"
-        err = f"  ⚠ {r['error']}" if r["error"] else ""
-        print(fmt.format(r["provider"], healthy_str, lat, code, str(r["priority"]), key_str, models + err))
+def cmd_status() -> int:
+    statuses = all_statuses()
 
+    print(f"Provider Status ({utc_now()})")
+    print("━" * 37)
 
-    print()
-    print("Quota Hints:")
-    for r in rows:
-        limit = r["daily_limit"]
-        note = r["quota_note"]
-        if limit:
-            print(f"  {r['provider']}: ~{limit}/day — {note}")
-        elif note:
-            print(f"  {r['provider']}: {note}")
+    total_remaining = 0
+    underutilized: List[str] = []
+
+    for s in statuses:
+        icon = "✅" if s.healthy else "⚠️"
+        name = _display_name(s.provider)
+        limit = PROVIDERS[s.provider]["daily_limit"]
+
+        if s.used_daily is None or s.remaining_pct is None or s.remaining_daily is None:
+            usage_txt = f"?/{limit} daily"
+            rem_txt = "unknown remaining"
+        else:
+            usage_txt = f"{s.used_daily}/{limit} daily"
+            rem_txt = f"{s.remaining_pct}% remaining"
+            total_remaining += s.remaining_daily
+            used_pct = 100 - s.remaining_pct
+            if used_pct <= 5:
+                underutilized.append(f"{name} ({used_pct}%)")
+
+        line = f"{name:<18} {icon} {usage_txt:>14}  ({rem_txt})"
+        if s.error and s.used_daily is None:
+            line += f"  [{s.error}]"
+        print(line)
+
+    print("━" * 37)
+    print(f"Total capacity remaining: ~{total_remaining:,} requests")
+    if underutilized:
+        print(f"Underutilized: {', '.join(underutilized)}")
+    else:
+        print("Underutilized: none")
 
     return 0
 
 
-def cmd_select(
-    config: Dict[str, Any], env: Dict[str, str], model_id: str, as_json: bool
-) -> int:
-    """Pick best healthy provider for a model, output provider/model."""
-    model_providers = config.get("model_providers", {})
-    max_age = config.get("staleness_max_seconds", 600)
+def _candidate_providers_for_tier(tier: str) -> List[str]:
+    direct = [name for name, cfg in PROVIDERS.items() if cfg["tier"] == tier]
+    if direct:
+        return direct
 
-    candidates = model_providers.get(model_id, [])
+    providers: List[str] = []
+    seen = set()
+
+    def add_for_t(t: str) -> None:
+        for p, cfg in PROVIDERS.items():
+            if cfg["tier"] == t and p not in seen:
+                seen.add(p)
+                providers.append(p)
+
+    add_for_t(tier)
+    for fb in TIER_FALLBACKS.get(tier, []):
+        add_for_t(fb)
+
+    return providers
+
+
+def cmd_select(tier: str) -> int:
+    candidates = _candidate_providers_for_tier(tier)
     if not candidates:
-        if as_json:
-            print(json.dumps({"error": f"unknown model: {model_id}", "model": model_id}))
-        else:
-            print(f"ERROR: Unknown model '{model_id}'", file=sys.stderr)
+        print(f"ERROR: Unknown tier '{tier}'", file=sys.stderr)
         return 1
 
-    health = load_health(max_age)
-    providers_cfg = config.get("providers", {})
+    usages = [fetch_usage(name, PROVIDERS[name]) for name in candidates]
 
-    def score(pname: str) -> Tuple[int, int, int]:
-        if health:
-            d = health.get("providers", {}).get(pname, {})
-            return (0 if d.get("healthy") else 1, d.get("priority", 99), d.get("latency_ms", 9999))
-        # No health data — use config priority only
-        p = providers_cfg.get(pname, {})
-        return (0, p.get("priority", 99), 9999)
+    healthy_with_headroom = [
+        u for u in usages if u.healthy and u.remaining_pct is not None and u.remaining_pct > 10
+    ]
+    if healthy_with_headroom:
+        best = max(healthy_with_headroom, key=lambda u: (u.remaining_pct or -1, u.remaining_daily or -1))
+        print(best.model)
+        return 0
 
-    ranked = sorted(candidates, key=score)
-    best = ranked[0]
+    healthy_any = [u for u in usages if u.healthy and u.remaining_pct is not None]
+    if healthy_any:
+        best = max(healthy_any, key=lambda u: (u.remaining_pct or -1, u.remaining_daily or -1))
+        print(f"{best.model}  # WARNING: all candidates <=10% remaining")
+        return 0
 
+    # Last resort: provider reachable but usage unknown
+    reachable_unknown = [u for u in usages if u.healthy]
+    if reachable_unknown:
+        best = reachable_unknown[0]
+        print(f"{best.model}  # WARNING: usage unknown, selecting best available")
+        return 0
 
-    best_cfg = providers_cfg.get(best, {})
-    has_key = bool(resolve_key(best_cfg, env))
-
-    if as_json:
-        result = {
-            "model": model_id,
-            "provider": best,
-            "route": f"{best}/{model_id}",
-            "healthy": True,
-            "key_present": has_key,
-            "all_candidates": ranked,
-        }
-        if health:
-            h = health.get("providers", {}).get(best, {})
-            result["healthy"] = h.get("healthy", True)
-            result["latency_ms"] = h.get("latency_ms")
-        quota = QUOTA_HINTS.get(best, {})
-        if quota.get("daily_limit"):
-            result["daily_limit"] = quota["daily_limit"]
-        print(json.dumps(result, indent=2, default=str))
-    else:
-        warning = ""
-        if health:
-            h = health.get("providers", {}).get(best, {})
-            if not h.get("healthy", True):
-                warning = " ⚠ UNHEALTHY"
-        if not has_key:
-            warning += " ⚠ KEY MISSING"
-        quota = QUOTA_HINTS.get(best, {})
-        quota_str = f" (~{quota['daily_limit']}/day)" if quota.get("daily_limit") else ""
-        print(f"{best}/{model_id}{warning}{quota_str}")
-
+    # Final fallback: return first model anyway as requested
+    fallback = usages[0]
+    print(f"{fallback.model}  # WARNING: all providers exhausted/unhealthy")
     return 0
 
 
-def cmd_check_health(
-    config: Dict[str, Any], env: Dict[str, str], as_json: bool
-) -> int:
-    """Run live health checks on all providers, write provider-health.json."""
-    providers = config.get("providers", {})
-    results: Dict[str, Dict[str, Any]] = {}
+def _extract_services_from_payload(payload: Any) -> List[Tuple[str, str]]:
+    bad_states = {"degraded", "down", "outage", "major_outage", "partial_outage", "incident"}
+    findings: List[Tuple[str, str]] = []
 
-    for name, cfg in providers.items():
-        results[name] = check_one_provider(name, cfg, env)
+    if isinstance(payload, dict):
+        if "services" in payload and isinstance(payload["services"], list):
+            for s in payload["services"]:
+                if not isinstance(s, dict):
+                    continue
+                name = str(s.get("name") or s.get("service") or "unknown")
+                status = str(s.get("status") or s.get("state") or "unknown").lower()
+                if status in bad_states:
+                    findings.append((name, status))
 
-    output = {
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "providers": results,
+        for k, v in payload.items():
+            if isinstance(v, dict):
+                status = str(v.get("status") or v.get("state") or "").lower()
+                if status in bad_states:
+                    findings.append((str(v.get("name") or k), status))
+
+    return findings
+
+
+def cmd_check_health() -> int:
+    token = env_value("APP_CLAUDE_KEY")
+    if not token:
+        print("ERROR: missing $APP_CLAUDE_KEY", file=sys.stderr)
+        return 1
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "text/event-stream, application/json, text/plain",
     }
 
-    # Atomic write
-    fd, tmp = tempfile.mkstemp(dir=TOOLS_DIR, suffix=".tmp")
     try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(output, f, indent=2)
-        os.replace(tmp, HEALTH_FILE)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        resp = requests.get(STATUS_STREAM_URL, headers=headers, timeout=TIMEOUT_SECONDS)
+    except requests.RequestException as e:
+        print(f"ERROR: health stream request failed: {e}", file=sys.stderr)
+        return 1
 
-    if as_json:
-        print(json.dumps(output, indent=2, default=str))
-    else:
-        print(f"Health check completed — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-        print()
-        for name, r in results.items():
-            icon = "✅" if r["healthy"] else "❌"
-            err = f" ({r['error']})" if r.get("error") else ""
-            print(f"  {icon} {name}: HTTP {r['status_code']} ({r['latency_ms']}ms){err}")
+    if resp.status_code != 200:
+        print(f"ERROR: health stream http {resp.status_code}", file=sys.stderr)
+        return 1
 
-    healthy_count = sum(1 for r in results.values() if r["healthy"])
-    total = len(results)
-    if not as_json:
-        print(f"\n{healthy_count}/{total} providers healthy")
+    text = resp.text.strip()
+    findings: List[Tuple[str, str]] = []
 
-    return 0 if healthy_count > 0 else 1
+    # Try JSON body first
+    try:
+        payload = resp.json()
+        findings = _extract_services_from_payload(payload)
+    except ValueError:
+        # Parse SSE/plain lines
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+                findings.extend(_extract_services_from_payload(payload))
+                continue
+            except ValueError:
+                pass
+
+            low = line.lower()
+            if any(flag in low for flag in ("degraded", "down", "outage", "incident")):
+                findings.append(("status-stream", line))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique: List[Tuple[str, str]] = []
+    for item in findings:
+        if item in seen:
+            continue
+        seen.add(item)
+        unique.append(item)
+
+    if not unique:
+        print("All services healthy ✅")
+        return 0
+
+    print("Degraded services detected:")
+    for name, status in unique:
+        print(f"- {name}: {status}")
+    return 1
 
 
-# ── Main ──────────────────────────────────────────────────────────────
-
-
-def usage():
+def usage() -> None:
     print(
-        """provider-router.py — real-time quota awareness for all 7 providers
-
-Usage:
-    provider-router.py status [--json]          Show all providers + health + quota
-    provider-router.py select MODEL [--json]    Pick best provider for MODEL
-    provider-router.py check-health [--json]    Run live health checks
-
-Options:
-    --json    Machine-readable JSON output
-
-Examples:
-    provider-router.py status
-    provider-router.py select claude-opus-4-6
-    provider-router.py select gpt-5.3-codex --json
-    provider-router.py check-health"""
+        "Usage:\n"
+        "  python3 provider-router.py status\n"
+        "  python3 provider-router.py select <tier>\n"
+        "  python3 provider-router.py check-health"
     )
 
 
 def main() -> int:
-    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+    if len(sys.argv) < 2:
         usage()
-        return 0
-
-    cmd = sys.argv[1]
-    as_json = "--json" in sys.argv
-
-    try:
-        config = load_config()
-    except (FileNotFoundError, json.JSONDecodeError) as e:
-        print(f"ERROR: Could not load {CONFIG_FILE}: {e}", file=sys.stderr)
         return 1
 
-    env = load_env()
+    cmd = sys.argv[1].strip().lower()
 
     if cmd == "status":
-        return cmd_status(config, env, as_json)
-    elif cmd == "select":
-        args = [a for a in sys.argv[2:] if a != "--json"]
-        if not args:
-            print("ERROR: select requires a MODEL argument", file=sys.stderr)
+        return cmd_status()
+    if cmd == "select":
+        if len(sys.argv) < 3:
+            print("ERROR: missing tier", file=sys.stderr)
             return 1
-        return cmd_select(config, env, args[0], as_json)
-    elif cmd == "check-health":
-        return cmd_check_health(config, env, as_json)
-    else:
-        print(f"ERROR: Unknown command '{cmd}'", file=sys.stderr)
-        usage()
-        return 1
+        return cmd_select(sys.argv[2].strip())
+    if cmd == "check-health":
+        return cmd_check_health()
+
+    usage()
+    return 1
 
 
 if __name__ == "__main__":
