@@ -13,6 +13,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -27,6 +28,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": None,
         "models": ["claude-sonnet-4-5", "claude-opus-4-5"],
         "tier": "claude-standard",
+        "priority": 80,
     },
     "app.claude.gg": {
         "usage_url": "https://app.claude.gg/api/me?key={key}",
@@ -40,6 +42,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
             "claude-haiku-4-5",
         ],
         "tier": "claude-premium",
+        "priority": 95,
     },
     "beta.vertexapis.com": {
         "usage_url": "https://beta.vertexapis.com/api/me?key={key}",
@@ -48,6 +51,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": 450,
         "models": ["gemini-2.5-flash", "gemini-3-pro"],
         "tier": "gemini",
+        "priority": 70,
     },
     "img.claude.gg": {
         "usage_url": "https://img.claude.gg/api/me",
@@ -57,6 +61,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": 400,
         "models": ["image-generation"],
         "tier": "image",
+        "priority": 60,
     },
     "codex.claude.gg": {
         "usage_url": "https://codex.claude.gg/api/me?key={key}",
@@ -65,6 +70,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": 5000,
         "models": ["gpt-5.2-codex", "gpt-5.3-codex"],
         "tier": "codex",
+        "priority": 100,
     },
     "perplexity.claude.gg": {
         "usage_url": "https://perplexity.claude.gg/api/me",
@@ -74,6 +80,7 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": 700,
         "models": ["perplexity-search"],
         "tier": "search",
+        "priority": 50,
     },
     "gateai": {
         "usage_url": "https://api.gateai.app/api/me?key={key}",
@@ -82,11 +89,13 @@ PROVIDERS: Dict[str, Dict[str, Any]] = {
         "hourly_limit": None,
         "models": ["gpt-5.2-codex", "gpt-5.3-codex"],
         "tier": "codex-fallback",
+        "priority": 40,
     },
 }
 
 STATUS_STREAM_URL = "https://cortexai.com.tr/api/status/stream"
 TIMEOUT_SECONDS = 12
+HEALTH_CACHE_FILE = os.path.expanduser("~/.cache/provider-router-health.json")
 
 # Fallbacks by tier family. Primary key is requested tier.
 TIER_FALLBACKS: Dict[str, List[str]] = {
@@ -216,7 +225,7 @@ def fetch_usage(provider: str, cfg: Dict[str, Any]) -> ProviderUsage:
             used_daily=None,
             remaining_daily=None,
             remaining_pct=None,
-            error=f"missing ${env_key}",
+            error=f"missing env var {env_key}",
         )
 
     usage_url = cfg["usage_url"]
@@ -389,33 +398,33 @@ def cmd_select(tier: str) -> int:
         print(f"ERROR: Unknown tier '{tier}'", file=sys.stderr)
         return 1
 
-    usages = [fetch_usage(name, PROVIDERS[name]) for name in candidates]
+    providers_cfg = {name: PROVIDERS[name] for name in candidates}
+    usages = [fetch_usage(name, providers_cfg[name]) for name in candidates]
 
-    healthy_with_headroom = [
-        u for u in usages if u.healthy and u.remaining_pct is not None and u.remaining_pct > 10
-    ]
-    if healthy_with_headroom:
-        best = max(healthy_with_headroom, key=lambda u: (u.remaining_pct or -1, u.remaining_daily or -1))
+    def score(u: ProviderUsage) -> Tuple[int, int, int]:
+        cfg = providers_cfg.get(u.provider, {})
+        # Priority must come from static provider config, not any cached health data.
+        priority = int(cfg.get("priority", 0))
+        remaining_pct = u.remaining_pct if u.remaining_pct is not None else -1
+        remaining_daily = u.remaining_daily if u.remaining_daily is not None else -1
+        return (priority, remaining_pct, remaining_daily)
+
+    healthy_candidates = []
+    for u in usages:
+        cfg = providers_cfg.get(u.provider, {})
+        has_key = bool(env_value(str(cfg.get("env_key", ""))))
+        if u.healthy and has_key:
+            healthy_candidates.append(u)
+
+    if healthy_candidates:
+        best = max(healthy_candidates, key=score)
         print(best.model)
         return 0
 
-    healthy_any = [u for u in usages if u.healthy and u.remaining_pct is not None]
-    if healthy_any:
-        best = max(healthy_any, key=lambda u: (u.remaining_pct or -1, u.remaining_daily or -1))
-        print(f"{best.model}  # WARNING: all candidates <=10% remaining")
-        return 0
-
-    # Last resort: provider reachable but usage unknown
-    reachable_unknown = [u for u in usages if u.healthy]
-    if reachable_unknown:
-        best = reachable_unknown[0]
-        print(f"{best.model}  # WARNING: usage unknown, selecting best available")
-        return 0
-
-    # Final fallback: return first model anyway as requested
-    fallback = usages[0]
-    print(f"{fallback.model}  # WARNING: all providers exhausted/unhealthy")
-    return 0
+    # No healthy candidate: return highest-priority configured provider as degraded.
+    fallback = max(usages, key=score)
+    print(f"{fallback.model}  # degraded: true")
+    return 1
 
 
 def _extract_services_from_payload(payload: Any) -> List[Tuple[str, str]]:
@@ -444,7 +453,7 @@ def _extract_services_from_payload(payload: Any) -> List[Tuple[str, str]]:
 def cmd_check_health() -> int:
     token = env_value("APP_CLAUDE_KEY")
     if not token:
-        print("ERROR: missing $APP_CLAUDE_KEY", file=sys.stderr)
+        print("ERROR: missing env var APP_CLAUDE_KEY", file=sys.stderr)
         return 1
 
     headers = {
@@ -499,9 +508,36 @@ def cmd_check_health() -> int:
         seen.add(item)
         unique.append(item)
 
+    write_failed = False
+    tmp_path: Optional[str] = None
+    try:
+        cache_dir = os.path.dirname(HEALTH_CACHE_FILE) or "."
+        os.makedirs(cache_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".provider-router-health-", dir=cache_dir)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "checked_at": utc_now(),
+                    "healthy": not bool(unique),
+                    "findings": [{"name": n, "status": st} for n, st in unique],
+                },
+                f,
+                ensure_ascii=False,
+            )
+            f.write("\n")
+        os.replace(tmp_path, HEALTH_CACHE_FILE)
+    except (PermissionError, OSError) as e:
+        write_failed = True
+        print(f"ERROR: unable to write health cache '{HEALTH_CACHE_FILE}': {e}", file=sys.stderr)
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
     if not unique:
         print("All services healthy ✅")
-        return 0
+        return 1 if write_failed else 0
 
     print("Degraded services detected:")
     for name, status in unique:
