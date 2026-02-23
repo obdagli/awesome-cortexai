@@ -393,32 +393,49 @@ def _candidate_providers_for_tier(tier: str) -> List[str]:
 
 
 def cmd_select(tier: str) -> int:
-    candidates = _candidate_providers_for_tier(tier)
-    if not candidates:
+    provider_names = _candidate_providers_for_tier(tier)
+    if not provider_names:
         print(f"ERROR: Unknown tier '{tier}'", file=sys.stderr)
         return 1
 
-    providers_cfg = {name: PROVIDERS[name] for name in candidates}
-    usages = [fetch_usage(name, providers_cfg[name]) for name in candidates]
+    providers_cfg = {name: PROVIDERS[name] for name in provider_names}
+    usages = [fetch_usage(name, providers_cfg[name]) for name in provider_names]
+
+    health_data: Dict[str, Dict[str, Any]] = {}
+    try:
+        with open(HEALTH_CACHE_FILE, "r", encoding="utf-8") as f:
+            cached = json.load(f)
+        if isinstance(cached, dict):
+            if isinstance(cached.get("providers"), dict):
+                health_data = cached["providers"]
+            else:
+                health_data = {k: v for k, v in cached.items() if isinstance(v, dict)}
+    except (FileNotFoundError, PermissionError, OSError, ValueError, json.JSONDecodeError):
+        health_data = {}
 
     def score(u: ProviderUsage) -> Tuple[int, int, int]:
-        cfg = providers_cfg.get(u.provider, {})
-        # Priority must come from static provider config, not any cached health data.
-        priority = int(cfg.get("priority", 0))
+        pname = u.provider
+        priority = int(providers_cfg[pname].get("priority", 99))
         remaining_pct = u.remaining_pct if u.remaining_pct is not None else -1
         remaining_daily = u.remaining_daily if u.remaining_daily is not None else -1
         return (priority, remaining_pct, remaining_daily)
 
-    healthy_candidates = []
+    usage_by_provider = {u.provider: u for u in usages}
+
+    candidates: List[Tuple[Tuple[int, int, int], str]] = []
     for u in usages:
         cfg = providers_cfg.get(u.provider, {})
         has_key = bool(env_value(str(cfg.get("env_key", ""))))
         if u.healthy and has_key:
-            healthy_candidates.append(u)
+            candidates.append((score(u), u.provider))
 
+    healthy_candidates = [(s, m) for s, m in candidates if health_data.get(m, {}).get("healthy", True)]
     if healthy_candidates:
-        best = max(healthy_candidates, key=score)
-        print(best.model)
+        candidates = healthy_candidates
+
+    if candidates:
+        best_provider = max(candidates, key=lambda item: item[0])[1]
+        print(usage_by_provider[best_provider].model)
         return 0
 
     # No healthy candidate: return highest-priority configured provider as degraded.
@@ -511,24 +528,27 @@ def cmd_check_health() -> int:
     write_failed = False
     tmp_path: Optional[str] = None
     try:
-        cache_dir = os.path.dirname(HEALTH_CACHE_FILE) or "."
-        os.makedirs(cache_dir, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(prefix=".provider-router-health-", dir=cache_dir)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "checked_at": utc_now(),
-                    "healthy": not bool(unique),
-                    "findings": [{"name": n, "status": st} for n, st in unique],
-                },
-                f,
-                ensure_ascii=False,
-            )
-            f.write("\n")
-        os.replace(tmp_path, HEALTH_CACHE_FILE)
-    except (PermissionError, OSError) as e:
+        try:
+            cache_dir = os.path.dirname(HEALTH_CACHE_FILE) or "."
+            os.makedirs(cache_dir, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(prefix=".provider-router-health-", dir=cache_dir)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "checked_at": utc_now(),
+                        "healthy": not bool(unique),
+                        "findings": [{"name": n, "status": st} for n, st in unique],
+                    },
+                    f,
+                    ensure_ascii=False,
+                )
+                f.write("\n")
+            os.replace(tmp_path, HEALTH_CACHE_FILE)
+        except (PermissionError, OSError) as e:
+            print(f"WARN: could not write health file: {e}", file=sys.stderr)
+            raise
+    except (PermissionError, OSError):
         write_failed = True
-        print(f"ERROR: unable to write health cache '{HEALTH_CACHE_FILE}': {e}", file=sys.stderr)
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
