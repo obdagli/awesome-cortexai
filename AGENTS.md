@@ -269,7 +269,7 @@ Include status board output in heartbeat responses when useful. Also available v
 
 ### Rules
 
-- opencode-dispatch.sh auto-logs spawns and completions — no manual logging needed for dispatched workers
+- Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 - For `sessions_spawn` workers, log manually before and after
 - Never skip logging — if a worker ran, it must appear in the log
 - Log file: `tools/worker-log.jsonl`
@@ -521,10 +521,10 @@ Review (Codex GPT-5.3) → Fix Loop (max 3) → Judge (Opus, if needed) → Verd
 tools/grapple-pipeline.sh --task "implement auth middleware" --repo /path/to/repo
 
 # Via dispatch wrapper (automatic for full profile)
-opencode-dispatch.sh full "implement auth middleware"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # Skip grapple review for a full profile task
-opencode-dispatch.sh full --no-grapple "implement auth middleware"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # Dry run (shows what would happen)
 tools/grapple-pipeline.sh --task "test" --dry-run
@@ -704,15 +704,15 @@ Every worker task goes through `opencode run` via the dispatch wrapper. No inlin
 ### Dispatch Wrapper
 
 ```bash
-# Location: /home/brk/tools/opencode-dispatch.sh
+# Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # Quick profile — search, git, file reads, status checks
-opencode-dispatch.sh quick "search for express auth middleware patterns"
-opencode-dispatch.sh quick --template quick-git "commit with message feat(api): add auth"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # Full profile — coding, review, architecture
-opencode-dispatch.sh full "implement JWT validation in src/api/middleware/"
-opencode-dispatch.sh full --template full-review "review changes in src/auth/"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 ```
 
 ### Profile Selection — Decision Table
@@ -748,13 +748,13 @@ Located at `/home/brk/tools/prompt-templates/`:
 
 ```bash
 # ✅ Search via quick profile
-opencode-dispatch.sh quick --template quick-search "find latest Temporal SDK docs"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # ✅ Code change via full profile
-opencode-dispatch.sh full --template full-code "add rate limiting to POST /api/auth/login"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 
 # ✅ Git commit via quick profile
-opencode-dispatch.sh quick --template quick-git "stage and commit src/auth/ changes"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 ```
 
 ### Bad Examples
@@ -769,7 +769,7 @@ EOF
 echo 'export const API_KEY = process.env.KEY;' >> src/config.ts
 
 # ❌ Using full profile for simple search — WASTEFUL
-opencode-dispatch.sh full "what is the current git branch"
+Call `opencode run` directly. Do NOT use opencode-dispatch.sh — it is deprecated.
 ```
 
 ### Compliance
