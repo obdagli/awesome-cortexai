@@ -157,6 +157,23 @@ def extract_daily_used(payload: Any, daily_limit: int) -> Optional[int]:
     if not isinstance(payload, (dict, list)):
         return None
 
+    # Case 1: codex.claude.gg format {"usage": {"daily": N, "dailyLimit": M}}
+    if isinstance(payload, dict) and "usage" in payload:
+        u = payload["usage"]
+        if isinstance(u, dict) and "daily" in u:
+            return max(0, int(u["daily"]))
+
+    # Case 2: {"success": true, "data": {"rate_limit": {"used": N, ...}}}
+    if isinstance(payload, dict) and "data" in payload:
+        d = payload["data"]
+        if isinstance(d, dict) and "rate_limit" in d:
+            rl = d["rate_limit"]
+            if isinstance(rl, dict):
+                if "used" in rl:
+                    return max(0, int(rl["used"]))
+                if "limit" in rl and "remaining" in rl:
+                    return max(0, int(rl["limit"]) - int(rl["remaining"]))
+
     exact_used_keys = {
         "daily_used",
         "dailyusage",
