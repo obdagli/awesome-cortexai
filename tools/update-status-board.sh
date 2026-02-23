@@ -70,8 +70,8 @@ ${PROJECT_STATUS}"
 fi
 
 # ── Push to Telegram ─────────────────────────────────────────────────
-openclaw message edit --channel telegram -t 1260478841 --message-id 843 -m "$MSG"
+openclaw message edit --channel telegram -t 1260478841 --message-id 8090 -m "$MSG"
 
 echo "$MSG"
 echo ""
-echo "✅ Status board pushed to Telegram (msg 843)"
+echo "✅ Status board pushed to Telegram (msg 8090)"
