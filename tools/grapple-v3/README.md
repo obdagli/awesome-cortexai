@@ -1,69 +1,44 @@
 # grapple-v3
 
-Code review pipeline wrapper around opencode+omo with reviewer/judge gates.
+Subagent-based code review pipeline wrapper around opencode + reviewer/judge gates.
 
-## Flow
+## Architecture (new)
 
 ```text
-writer (opencode/omo)
-  -> reviewer (Codex via sessions_spawn)
-  -> judge (Opus via sessions_spawn)
-    -> pass      => done
-    -> retry     => run writer again with judge retry_prompt (max 2 retries)
+Claw spawns grapple worker (subagent)
+  -> writer: opencode run
+  -> reviewer: sessions_spawn (Codex)
+  -> judge: sessions_spawn (Opus)
+    -> pass      => commit + report success
+    -> retry     => re-run writer with retry prompt (max 2)
     -> escalate  => Telegram alert + forensic log
 ```
 
-### Trigger model (hybrid)
-
-- Primary: omo `session-complete` hook emits event file
-- Fallback: `grapple.sh` runs review on process exit if hook event missing
-- Idempotency: marker in `/tmp/grapple-v3/reviewed/` prevents double-review
+All orchestration now happens inside the grapple worker subagent (where sessions_spawn is available). Shell scripts no longer attempt to call sessions_spawn.
 
 ## Files
 
-- `grapple.sh` — main entry point
-- `reviewer.sh` — Codex reviewer (`cliproxyapi/gpt-5.3-codex`)
-- `judge.sh` — Opus judge (`app-claude/claude-opus-4-6`)
-- `notify.sh` — escalation message to Telegram + forensic logging
-- `omo-hook.md` — hook wiring instructions
-- `logs/` — per-run forensic JSON logs
+- `grapple.sh` — thin wrapper: prints how to spawn the worker
+- `WORKER_PROMPT.md` — canonical worker prompt template (variables: {{TASK}}, {{PROJECT}})
+- `omo-hook.md` — legacy hook wiring (kept for reference)
+- `logs/` — per-run forensic JSON logs (written by worker on escalation)
 
 ## Usage
 
-```bash
-/home/brk/tools/grapple-v3/grapple.sh "implement auth middleware" --project /home/brk/projects/myrepo
+From an agent (not shell), spawn a worker using the template:
+
+1. Load `tools/grapple-v3/WORKER_PROMPT.md`
+2. Replace {{TASK}} and {{PROJECT}}
+3. sessions_spawn the worker with the resulting task text
+
+Example (conceptual):
+
 ```
-
-Optional:
-
-```bash
---dry-run
+sessions_spawn:
+  task: <WORKER_PROMPT with variables substituted>
 ```
-
-## Output log
-
-Every run writes:
-
-`/home/brk/tools/grapple-v3/logs/<timestamp-randid>.json`
-
-Contains:
-- run metadata
-- hook/fallback info
-- all round reviewer/judge outputs
-- final verdict and reason
-- changed files snapshot
-
-## Escalation behavior
-
-On `escalate` (or repeated reject reason class), `notify.sh` sends Telegram alert to chat `1260478841` with:
-- task summary
-- changed files
-- failure reason
-- per-round attempt summary
-- risk + action
-- path to full forensic log
 
 ## Notes
 
-- reviewer/judge are implemented with `sessions_spawn` gateway calls in scripts.
-- scripts include fallback to `sessions.spawn` method name for compatibility.
+- reviewer/judge are spawned inline by the worker
+- old shell-based reviewer/judge/notify scripts removed

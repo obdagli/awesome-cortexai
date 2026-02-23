@@ -1,0 +1,40 @@
+{
+  "timestamp_utc": "2026-02-23T10:30:33.727706Z",
+  "run_id": "20260223T103023Z-7298-5458",
+  "idempotency_key": "grapple-v3-20260223T103023Z-7298-5458",
+  "task_summary": "Add a utility function get_output_dir() to /home/brk/projects/promptswar/generate_reel.py that returns the output directory path, creating it if it doesn't exist. Keep it simple — 5 lines max.",
+  "project": "/home/brk/projects/promptswar",
+  "hook_event_received": false,
+  "final": {
+    "verdict": "escalate",
+    "reason": "sessions_spawn unavailable",
+    "risk": "high",
+    "attempts_used": 1,
+    "max_retries": 2
+  },
+  "changed_files": [],
+  "rounds": [
+    {
+      "round": 1,
+      "reviewer": {
+        "findings": [
+          {
+            "file": "<repo>",
+            "line": 0,
+            "severity": "medium",
+            "message": "no changes detected"
+          }
+        ],
+        "summary": "No changes detected; reviewer cannot evaluate this round.",
+        "pass": false
+      },
+      "judge": {
+        "verdict": "escalate",
+        "reason": "sessions_spawn unavailable",
+        "risk": "high",
+        "retry_prompt": ""
+      },
+      "diff_excerpt": ""
+    }
+  ]
+}
