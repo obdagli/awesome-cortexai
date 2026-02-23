@@ -40,7 +40,7 @@ done
 
 # Run opencode in project dir
 pushd "$project" >/dev/null
-opencode run "$task"
+timeout 900 opencode run "$task"
 
 # Check git status
 status=$(git status --porcelain)
