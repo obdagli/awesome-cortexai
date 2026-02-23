@@ -18,23 +18,40 @@ cd "$PROJECT"
 
 get_diff() {
   local d=""
-  if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-    d=$(git diff --unified=0 HEAD~1..HEAD || true)
+
+  # Primary: include staged + unstaged changes against HEAD.
+  d="$(git diff --unified=0 HEAD || true)"
+  if [[ -n "$d" ]]; then
+    printf "%s" "$d"
+    return 0
   fi
-  if [[ -z "$d" ]]; then
-    d=$(git diff --cached --unified=0 || true)
+
+  # Fallback: only when writer committed this round.
+  if [[ "${GRAPPLE_V3_WRITER_COMMITTED_THIS_ROUND:-false}" == "true" ]]; then
+    local pre_head="${GRAPPLE_V3_PRE_HEAD:-}"
+    if [[ -n "$pre_head" ]] && git rev-parse --verify "$pre_head" >/dev/null 2>&1; then
+      d="$(git diff --unified=0 "${pre_head}"..HEAD || true)"
+      if [[ -n "$d" ]]; then
+        printf "%s" "$d"
+        return 0
+      fi
+    elif git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+      d="$(git diff --unified=0 HEAD~1..HEAD || true)"
+      if [[ -n "$d" ]]; then
+        printf "%s" "$d"
+        return 0
+      fi
+    fi
   fi
-  if [[ -z "$d" ]]; then
-    d=$(git diff --unified=0 || true)
-  fi
-  printf "%s" "$d"
+
+  printf ""
 }
 
 DIFF_CONTENT="$(get_diff)"
 
 if [[ -z "$DIFF_CONTENT" ]]; then
   cat <<'JSON'
-{"findings":[],"summary":"No diff found; nothing to review.","pass":true}
+{"findings":[{"file":"<repo>","line":0,"severity":"medium","message":"no changes detected"}],"summary":"No changes detected; reviewer cannot evaluate this round.","pass":false}
 JSON
   exit 0
 fi
@@ -93,26 +110,56 @@ python3 - <<'PY' "$RESP_FILE"
 import json,re,sys
 text=open(sys.argv[1]).read()
 
-# Try direct JSON object first
-try:
-    obj=json.loads(text)
-except Exception:
-    obj=None
 
-candidates=[]
-if obj is not None:
-    candidates.append(obj)
-
-# Extract JSON snippets from raw output (best effort)
-for m in re.finditer(r'\{[\s\S]*\}', text):
-    s=m.group(0)
+def extract_fenced_json(s: str):
+    m = re.search(r"```json\s*([\s\S]*?)\s*```", s, re.IGNORECASE)
+    if not m:
+        return None
+    payload = m.group(1).strip()
     try:
-        candidates.append(json.loads(s))
+        return json.loads(payload)
     except Exception:
-        pass
+        return None
+
+
+def extract_brace_json_objects(s: str):
+    objs = []
+    decoder = json.JSONDecoder()
+    i = 0
+    while i < len(s):
+      if s[i] != '{':
+        i += 1
+        continue
+      try:
+        obj, end = decoder.raw_decode(s[i:])
+        if isinstance(obj, dict):
+          objs.append(obj)
+        i += end
+      except Exception:
+        i += 1
+    return objs
+
 
 def looks_like_review(o):
     return isinstance(o,dict) and 'pass' in o and 'summary' in o and 'findings' in o
+
+candidates=[]
+
+# direct full parse
+try:
+    obj=json.loads(text)
+    if isinstance(obj, dict):
+      candidates.append(obj)
+except Exception:
+    pass
+
+# fenced json first (preferred)
+fenced = extract_fenced_json(text)
+if isinstance(fenced, dict):
+    candidates.append(fenced)
+
+# fallback brace matching
+candidates.extend(extract_brace_json_objects(text))
 
 chosen=None
 for c in reversed(candidates):

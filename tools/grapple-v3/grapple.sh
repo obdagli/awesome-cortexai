@@ -26,7 +26,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$RANDOM-$RANDOM"
 IDEMPOTENCY_KEY="grapple-v3-${RUN_ID}"
 EVENT_FILE="/tmp/grapple-v3/events/${RUN_ID}.session-complete.json"
 REVIEWED_MARKER="/tmp/grapple-v3/reviewed/${RUN_ID}.done"
-LOCK_FILE="/tmp/grapple-v3/locks/${RUN_ID}.lock"
+LOCK_FILE="/tmp/grapple-v3/locks/grapple-v3.lock"
 LOG_PATH="/home/brk/tools/grapple-v3/logs/${RUN_ID}.json"
 
 cd "$PROJECT"
@@ -38,6 +38,10 @@ RISK="medium"
 WHY_FAILED=""
 ACTION="accept"
 HOOK_RECEIVED=false
+WRITER_FAILED=false
+WRITER_EXIT_CODE=0
+WRITER_COMMITTED_THIS_ROUND=false
+PRE_HEAD=""
 
 ROUNDS_JSON='[]'
 
@@ -60,14 +64,14 @@ trigger_review_once() {
 
   # local lock for fallback path idempotency
   exec 9>"$LOCK_FILE"
-  flock -n 9 || true
+  flock -n 9 || { echo "Another grapple run in progress" >&2; exit 1; }
 
   if [[ -f "$REVIEWED_MARKER" ]]; then
     return 0
   fi
 
   local review_json judge_json retry_prompt diff_excerpt
-  diff_excerpt="$(git diff --unified=0 HEAD~1..HEAD 2>/dev/null | head -200 || true)"
+  diff_excerpt="$(git diff --unified=0 HEAD 2>/dev/null | head -200 || true)"
 
   review_json="$({ /home/brk/tools/grapple-v3/reviewer.sh --project "$PROJECT" --round "$ROUND" --task "$TASK"; } | tail -n 1)"
   judge_json="$({ /home/brk/tools/grapple-v3/judge.sh --project "$PROJECT" --round "$ROUND" --review-json "$review_json" --history-json "$ROUNDS_JSON"; } | tail -n 1)"
@@ -127,11 +131,33 @@ while (( ATTEMPT <= MAX_RETRIES )); do
   export GRAPPLE_V3_EVENT_FILE="$EVENT_FILE"
   export GRAPPLE_V3_IDEMPOTENCY_KEY="$IDEMPOTENCY_KEY"
 
+  PRE_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+  WRITER_COMMITTED_THIS_ROUND=false
+
   if [[ "$DRY_RUN" == "true" ]]; then
     echo "[dry-run] would run: opencode run \"$TASK\""
   else
-    opencode run "$TASK" --cwd "$PROJECT" || true
+    if opencode run "$TASK" --dir "$PROJECT"; then
+      :
+    else
+      WRITER_EXIT_CODE=$?
+      WRITER_FAILED=true
+      VERDICT="escalate"
+      WHY_FAILED="writer failed with exit code ${WRITER_EXIT_CODE}"
+      RISK="high"
+      ACTION="writer failure"
+      echo "Writer run failed (exit=${WRITER_EXIT_CODE}); skipping review" >&2
+      break
+    fi
   fi
+
+  POST_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$PRE_HEAD" && -n "$POST_HEAD" && "$PRE_HEAD" != "$POST_HEAD" ]]; then
+    WRITER_COMMITTED_THIS_ROUND=true
+  fi
+
+  export GRAPPLE_V3_WRITER_COMMITTED_THIS_ROUND="$WRITER_COMMITTED_THIS_ROUND"
+  export GRAPPLE_V3_PRE_HEAD="$PRE_HEAD"
 
   if [[ -f "$EVENT_FILE" ]]; then
     HOOK_RECEIVED=true
@@ -154,14 +180,14 @@ while (( ATTEMPT <= MAX_RETRIES )); do
   rm -f "$REVIEWED_MARKER"
 done
 
-if [[ "$VERDICT" != "pass" && "$VERDICT" != "escalate" ]]; then
+if [[ "$WRITER_FAILED" != "true" && "$VERDICT" != "pass" && "$VERDICT" != "escalate" ]]; then
   VERDICT="escalate"
   WHY_FAILED="max retries exceeded"
   RISK="high"
   ACTION="fix X"
 fi
 
-CHANGED_FILES="$(git status --short | awk '{print $2}' | paste -sd ', ' -)"
+CHANGED_FILES="$(git diff --name-only HEAD | paste -sd ', ' -)"
 
 python3 - <<'PY' "$LOG_PATH" "$RUN_ID" "$IDEMPOTENCY_KEY" "$TASK" "$PROJECT" "$HOOK_RECEIVED" "$VERDICT" "$WHY_FAILED" "$RISK" "$ATTEMPT" "$MAX_RETRIES" "$ROUNDS_JSON" "$CHANGED_FILES"
 import json,sys,datetime
@@ -201,3 +227,7 @@ if [[ "$VERDICT" == "escalate" ]]; then
 fi
 
 echo "grapple-v3 complete: verdict=$VERDICT log=$LOG_PATH"
+
+if [[ "$WRITER_FAILED" == "true" ]]; then
+  exit 1
+fi

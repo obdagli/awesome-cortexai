@@ -98,21 +98,53 @@ def classify(reason:str)->str:
     if any(k in r for k in ['test','coverage','flaky']): return 'test'
     return 'general'
 
-candidates=[]
-try:
-    o=json.loads(text)
-    candidates.append(o)
-except Exception:
-    pass
-for m in re.finditer(r'\{[\s\S]*\}', text):
-    s=m.group(0)
+def extract_fenced_json(s: str):
+    m = re.search(r"```json\s*([\s\S]*?)\s*```", s, re.IGNORECASE)
+    if not m:
+        return None
+    payload = m.group(1).strip()
     try:
-        candidates.append(json.loads(s))
+        return json.loads(payload)
     except Exception:
-        pass
+        return None
+
+def extract_brace_json_objects(s: str):
+    objs = []
+    decoder = json.JSONDecoder()
+    i = 0
+    while i < len(s):
+        if s[i] != '{':
+            i += 1
+            continue
+        try:
+            obj, end = decoder.raw_decode(s[i:])
+            if isinstance(obj, dict):
+                objs.append(obj)
+            i += end
+        except Exception:
+            i += 1
+    return objs
 
 def looks_like(o):
     return isinstance(o,dict) and 'verdict' in o and 'reason' in o and 'risk' in o and 'retry_prompt' in o
+
+candidates=[]
+
+# direct parse
+try:
+    o=json.loads(text)
+    if isinstance(o, dict):
+      candidates.append(o)
+except Exception:
+    pass
+
+# fenced json first
+fenced = extract_fenced_json(text)
+if isinstance(fenced, dict):
+    candidates.append(fenced)
+
+# brace fallback
+candidates.extend(extract_brace_json_objects(text))
 
 chosen=None
 for c in reversed(candidates):
@@ -123,10 +155,16 @@ for c in reversed(candidates):
 if chosen is None:
     chosen={"verdict":"escalate","reason":"unparseable judge output","risk":"high","retry_prompt":""}
 
-# Enforce same-reason escalation
+# Enforce same-reason escalation using history shape: round.judge.reason
 if chosen.get('verdict') in ('retry','escalate'):
     cls=classify(chosen.get('reason',''))
-    prev=[classify((h or {}).get('reason','')) for h in history if isinstance(h,dict)]
+    prev=[]
+    for h in history:
+        if not isinstance(h, dict):
+            continue
+        judge = h.get('judge', {})
+        if isinstance(judge, dict):
+            prev.append(classify(judge.get('reason','')))
     if prev.count(cls) >= 1:
         chosen={
           "verdict":"escalate",

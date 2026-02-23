@@ -68,3 +68,7 @@ cat /tmp/grapple-v3/events/*.session-complete.json
 ```
 
 Even if hook fails, fallback logic in `grapple.sh` still runs reviewer/judge after writer exits.
+
+## Current limitation
+
+Hook support is currently **partial**: we only detect writer completion via the session-complete event file and then use fallback/script-side review triggering. Full hook-driven integration (including richer event semantics and end-to-end lifecycle wiring) is a future TODO.
