@@ -1,0 +1,23 @@
+{
+  "task": "Add a utility function get_reel_filename(prefix='reel') to /home/brk/projects/promptswar/generate_reel.py that returns a timestamped filename string like 'reel_custom_20260223_123456.mp4'. Keep it simple — 5 lines max.",
+  "project": "/home/brk/projects/promptswar",
+  "pre_sha": "72b1ae1b4fa6eafa016043d084ed1b18c259cafd",
+  "rounds": [
+    {
+      "round": 1,
+      "diff": "diff --git a/generate_reel.py b/generate_reel.py\nindex cf6c816..a0960c6 100644\n--- a/generate_reel.py\n+++ b/generate_reel.py\n@@ -35,6 +35,11 @@ MUSIC_TRACK_PATH = PROJECT_DIR / \"assets\" / \"music\" / \"beat.mp3\"\n MUSIC_BEAT_OFFSET = 0.48\n \n \n+\n+def get_reel_filename(prefix: str = 'reel') -> str:\n+    \"\"\"Return a timestamped reel filename like 'reel_custom_20260223_123456.mp4'.\"\"\"\n+    return f\"{prefix}_custom_{time.strftime('%Y%m%d_%H%M%S')}.mp4\"\n+\n def log(msg: str):\n     print(f\"[{time.strftime('%H:%M:%S')}] {msg}\", flush=True)\n",
+      "tests": {
+        "status": "fail",
+        "output": "ImportError while importing test module '/home/brk/projects/promptswar/test_reel_generation.py'. Hint: make sure your test modules/packages have valid Python names.\nTraceback:\n/usr/lib/python3.10/importlib/__init__.py:126: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\ntest_reel_generation.py:5: in <module>\n    from poc_dramatic_reel_v2 import generate_dramatic_reel\npoc_dramatic_reel_v2.py:16: in <module>\n    from generate_reel import (\nE   ImportError: cannot import name 'create_gradient_bg' from 'generate_reel' (/home/brk/projects/promptswar/generate_reel.py)"
+      },
+      "reviewer": {
+        "status": "error",
+        "error": "sessions_spawn unavailable (openclaw: unknown command 'sessions_spawn')."
+      },
+      "judge": {
+        "status": "skipped",
+        "reason": "reviewer not run"
+      }
+    }
+  ]
+}

@@ -1,44 +1,51 @@
 # grapple-v3
 
-Subagent-based code review pipeline wrapper around opencode + reviewer/judge gates.
+Thin wrapper around `opencode` / `omo` for code execution, with commit enforcement and Telegram reporting.
 
-## Architecture (new)
+## Architecture
 
-```text
-Claw spawns grapple worker (subagent)
-  -> writer: opencode run
-  -> reviewer: sessions_spawn (Codex)
-  -> judge: sessions_spawn (Opus)
-    -> pass      => commit + report success
-    -> retry     => re-run writer with retry prompt (max 2)
-    -> escalate  => Telegram alert + forensic log
-```
+**Default mode:**
+- `opencode run` executes the task (OMO handles writer + reviewer + judge internally)
+- Grapple enforces commit creation and sends a Telegram report
 
-All orchestration now happens inside the grapple worker subagent (where sessions_spawn is available). Shell scripts no longer attempt to call sessions_spawn.
+**Strict mode** (`--strict` or auto-triggered):
+- Grapple marks the run as **NEEDS REVIEW** and flags that an external judge must be triggered **by the orchestrator (Claw)**
+
+Auto-strict triggers:
+- Sensitive paths/files: `auth/`, `billing/`, `permissions/`, `infra/`, `*.env`, `config/prod*`, `MEMORY.md`, `AGENTS.md`, `*.service`, `crontab`
+- Diff size > 200 lines
+- Keywords in diff: `password`, `token`, `secret`, `api_key`, `DROP TABLE`, `rm -rf`, `sudo`
 
 ## Files
 
-- `grapple.sh` — thin wrapper: prints how to spawn the worker
-- `WORKER_PROMPT.md` — canonical worker prompt template (variables: {{TASK}}, {{PROJECT}})
-- `omo-hook.md` — legacy hook wiring (kept for reference)
-- `logs/` — per-run forensic JSON logs (written by worker on escalation)
+- `grapple.sh` — main entry point (run in shell)
+- `strict-check.sh` — diff analyzer that outputs JSON
+- `logs/` — per-run JSON logs
+- `archive/` — superseded files and scripts
 
 ## Usage
 
-From an agent (not shell), spawn a worker using the template:
+```bash
+grip="/path/to/project"
+/home/brk/tools/grapple-v3/grapple.sh "task summary" --project "$grip"
 
-1. Load `tools/grapple-v3/WORKER_PROMPT.md`
-2. Replace {{TASK}} and {{PROJECT}}
-3. sessions_spawn the worker with the resulting task text
-
-Example (conceptual):
-
-```
-sessions_spawn:
-  task: <WORKER_PROMPT with variables substituted>
+# strict mode
+/home/brk/tools/grapple-v3/grapple.sh "task summary" --project "$grip" --strict
 ```
 
-## Notes
+## Report
 
-- reviewer/judge are spawned inline by the worker
-- old shell-based reviewer/judge/notify scripts removed
+Telegram report format:
+
+```
+🔍 Grapple Report — <task summary>
+
+Verdict: ✅ PASS / 🚨 NEEDS REVIEW
+Commit: <hash>
+Mode: default / ⚠️ AUTO-STRICT triggered: <reason>
+
+Changed files: <list>
+Diff size: <N lines>
+
+Log: tools/grapple-v3/logs/<timestamp>.json
+```
