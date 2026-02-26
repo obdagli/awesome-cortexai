@@ -776,3 +776,22 @@ echo 'export const API_KEY = process.env.KEY;' >> src/config.ts
 
 Run `/home/brk/tools/check-opencode-compliance.py` periodically (heartbeat) to detect violations.
 Flags: heredocs, `cat >`, `echo >>`, multiline code blocks outside opencode run.
+
+## omo-first Task Routing (Preferred)
+
+For coding and complex tasks, route through opencode serve (4096) where omo handles agent selection:
+
+```bash
+# Let omo decide (default: sisyphus orchestrates)
+bash tools/omo-dispatch.sh "task description"
+
+# Target specific agent
+bash tools/omo-dispatch.sh --agent librarian "search for X"
+bash tools/omo-dispatch.sh --agent reviewer "review PR #1"
+bash tools/omo-dispatch.sh --agent explore "read file X"
+```
+
+Auto-routing: `python3 tools/omo-task-router.py "task"` returns the recommended agent.
+
+Use omo-dispatch for: coding, review, search, architecture tasks.
+Use direct sessions_spawn for: simple shell commands, file writes, transcription, media gen.
