@@ -6,13 +6,14 @@ API Key: `sk-your-api-key-here`
 
 ## Özet
 
-`translate.vertexapis.com`, Google Cloud Translation API v3'ün proxy'si olarak çalışıyor. v2 endpoint'leri desteklenmiyor (404). v3 ve v3beta1 endpoint'leri tam fonksiyonel.
+`translate.vertexapis.com`, birden fazla path ailesini destekliyor. Legacy Google path'i olan `/language/translate/v2` çalışıyor, düz `/v2` kısayol path'leri 404 dönüyor. `v3` ve `v3beta1` endpoint'leri de tam fonksiyonel.
 
 ## 1) API Versiyonları
 
-| Versiyon | Durum | Not |
-|----------|-------|-----|
-| v2 | ❌ 404 | `/v2`, `/v2/detect`, `/v2/languages` tüm endpoint'ler 404 |
+| Versiyon / Path Ailesi | Durum | Not |
+|------------------------|-------|-----|
+| Legacy v2 (`/language/translate/v2`) | ✅ Çalışıyor | Temel çeviri ve language list testleri başarılı |
+| Plain v2 (`/v2`) | ❌ 404 | `/v2`, `/v2/detect`, `/v2/languages` 404 |
 | v3 | ✅ Çalışıyor | Tam fonksiyonel |
 | v3beta1 | ✅ Çalışıyor | v3 ile aynı davranış |
 
@@ -298,7 +299,8 @@ Invalid JSON payload received. Unknown name "targetLanguageCode": Cannot find fi
 
 | Özellik | Google Cloud | translate.vertexapis.com |
 |---------|--------------|--------------------------|
-| v2 API | ✅ Destekleniyor | ❌ 404 |
+| Legacy v2 path (`/language/translate/v2`) | ✅ Destekleniyor | ✅ Çalışıyor |
+| Plain `/v2` kısayol path'leri | N/A | ❌ 404 |
 | AutoML modelleri | ✅ | ❓ Test edilemedi |
 | Custom model training | ✅ | ❓ Test edilemedi |
 
@@ -306,13 +308,14 @@ Invalid JSON payload received. Unknown name "targetLanguageCode": Cannot find fi
 
 ### 10.1 Çalışan ama dokümanda belirtilmeyen
 
-1. **v3beta1 endpoint'leri:** v3 ile aynı şekilde çalışıyor
-2. **global location:** Dokümanda sadece regional location'lar var, ama global da çalışıyor
-3. **labels parametresi:** translateText'te metadata olarak kabul ediliyor
+1. **Legacy `/language/translate/v2` path'i:** Çalışıyor, ama düz `/v2` değil
+2. **v3beta1 endpoint'leri:** v3 ile aynı şekilde çalışıyor
+3. **global location:** Dokümanda sadece regional location'lar var, ama global da çalışıyor
+4. **labels parametresi:** translateText'te metadata olarak kabul ediliyor
 
 ### 10.2 Çalışmayan ama beklenen
 
-1. **v2 API:** Tamamen 404
+1. **Plain `/v2` path'leri:** Tamamen 404
 2. **us location:** Sadece us-central1 ve global destekleniyor
 3. **Transliteration:** Sadece Japonca destekleniyor, Çince desteklenmiyor
 4. **Model parametresi:** Kısa format ("nmt") çalışmıyor, full path gerekiyor ama dummy project ile test edilemedi
@@ -344,9 +347,11 @@ Hata mesajları net ve açıklayıcı:
 
 | Endpoint | Method | Durum | Not |
 |----------|--------|-------|-----|
-| `/v2` | POST | ❌ 404 | v2 desteklenmiyor |
-| `/v2/detect` | POST | ❌ 404 | v2 desteklenmiyor |
-| `/v2/languages` | GET | ❌ 404 | v2 desteklenmiyor |
+| `/language/translate/v2` | POST | ✅ | Legacy Google path'i çalışıyor |
+| `/language/translate/v2/languages` | GET | ✅ | Legacy Google path'i çalışıyor |
+| `/v2` | POST | ❌ 404 | Plain root v2 path'i desteklenmiyor |
+| `/v2/detect` | POST | ❌ 404 | Plain root v2 path'i desteklenmiyor |
+| `/v2/languages` | GET | ❌ 404 | Plain root v2 path'i desteklenmiyor |
 | `/v3/.../translateText` | POST | ✅ | Tam fonksiyonel |
 | `/v3/.../detectLanguage` | POST | ✅ | Tam fonksiyonel |
 | `/v3/.../supportedLanguages` | GET | ✅ | 230+ dil |
@@ -364,20 +369,21 @@ Hata mesajları net ve açıklayıcı:
 
 ### 13.1 Genel Değerlendirme
 
-`translate.vertexapis.com`, Google Cloud Translation API v3'ün tam fonksiyonel bir proxy'si. Core translation özellikleri (translateText, detectLanguage, supportedLanguages) mükemmel çalışıyor.
+`translate.vertexapis.com`, hem legacy `/language/translate/v2` hem de modern `v3`/`v3beta1` path ailelerini sunuyor. Plain `/v2` kısayol path'leri desteklenmiyor. Core translation özellikleri (translateText, detectLanguage, supportedLanguages) güçlü şekilde çalışıyor.
 
 ### 13.2 Güçlü Yönler
 
-1. ✅ translateText tam fonksiyonel (batch, HTML, multi-language)
-2. ✅ detectLanguage yüksek doğrulukla çalışıyor
-3. ✅ 230+ dil desteği
-4. ✅ HTML tag koruması mükemmel
-5. ✅ Batch operations endpoint'leri çalışıyor
-6. ✅ v3beta1 desteği var
+1. ✅ Legacy `/language/translate/v2` path'i çalışıyor
+2. ✅ translateText tam fonksiyonel (batch, HTML, multi-language)
+3. ✅ detectLanguage yüksek doğrulukla çalışıyor
+4. ✅ 230+ dil desteği
+5. ✅ HTML tag koruması mükemmel
+6. ✅ Batch operations endpoint'leri çalışıyor
+7. ✅ v3beta1 desteği var
 
 ### 13.3 Zayıf Yönler / Kısıtlamalar
 
-1. ❌ v2 API tamamen desteklenmiyor
+1. ❌ Plain `/v2` path'leri desteklenmiyor
 2. ⚠️ romanizeText sadece Japonca için çalışıyor
 3. ⚠️ translateDocument test edilemedi (gerçek dosya gerekiyor)
 4. ⚠️ Model parametresi kısa format desteklemiyor
@@ -393,7 +399,7 @@ Hata mesajları net ve açıklayıcı:
 - Japonca romanizasyon
 
 **Dikkat edilmesi gerekenler:**
-- v2 API kullanmayın (404)
+- Legacy gerekiyorsa `/language/translate/v2` kullanın; düz `/v2` path'lerini kullanmayın
 - Location olarak `us-central1` veya `global` kullanın
 - Transliteration için sadece Japonca güvenilir
 - Model parametresi için full path kullanın
@@ -402,7 +408,7 @@ Hata mesajları net ve açıklayıcı:
 ### 13.5 Google Cloud Translation API ile Karşılaştırma
 
 **Parity:** %95+  
-**Eksik özellikler:** v2 API, sınırlı romanization  
+**Eksik özellikler:** plain `/v2` kısayol path'leri, sınırlı romanization  
 **Ek özellikler:** Yok  
 **Performans:** Eşdeğer
 

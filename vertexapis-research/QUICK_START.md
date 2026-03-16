@@ -1,99 +1,89 @@
-# 🚀 Quick Start Guide
+# Quick Start Guide
 
-## 1️⃣ Setup (30 seconds)
+This guide only uses helpers that are present in the current repo snapshot.
+
+## 1. Setup
 
 ```bash
-# Set API key
 export VERTEX_API_KEY="sk-your-api-key-here"
-
-# Or add to ~/.bashrc permanently
-echo 'export VERTEX_API_KEY="sk-your-key"' >> ~/.bashrc
-source ~/.bashrc
 ```
 
-## 2️⃣ Your First Image (10 seconds)
+## 2. List Available Models
 
 ```bash
-python3 vertex_media_generator.py image "a cat in space"
+python3 aiplatform_runner.py list-models
 ```
 
-## 3️⃣ Your First Video (90 seconds)
+## 3. Your First Text Request
 
 ```bash
-python3 vertex_media_generator.py video "ocean waves" -d 5 -r 720p
+python3 aiplatform_runner.py text \
+  --model gemini-3-pro-preview \
+  --prompt "Kisa bir merhaba yaz"
 ```
 
-## 📋 Common Commands
+## 4. Your First Image
 
 ```bash
-# List providers
-python3 vertex_media_generator.py list
-
-# Image - Gemini (simple)
-python3 vertex_media_generator.py image "your prompt" -p gemini
-
-# Image - Beta Flash (fast, 3500/day)
-python3 vertex_media_generator.py image "your prompt" -p beta
-
-# Image - Beta Pro (quality)
-python3 vertex_media_generator.py image "your prompt" -p beta --model pro
-
-# Video - Gemini only
-python3 vertex_media_generator.py video "your prompt" -p gemini
-
-# Quick test
-./quick_test.sh
+python3 aiplatform_runner.py image \
+  --model gemini-3.1-flash-image-preview \
+  --prompt "a cat in space" \
+  --aspect-ratio 1:1
 ```
 
-## 📊 Provider Choice
-
-| Need | Command |
-|------|---------|
-| Quick image test | `-p gemini` |
-| High-volume images | `-p beta` (3500/day) |
-| Best image quality | `-p beta --model pro` |
-| Any video | `-p gemini` (only option) |
-
-## 📁 Output
-
-All files: `~/vertex_outputs/`
+## 5. Common Commands
 
 ```bash
-# List files
-ls -lth ~/vertex_outputs/
+# Gemini image generation
+python3 aiplatform_runner.py image \
+  --model gemini-3.1-flash-image-preview \
+  --prompt "studio product shot" \
+  --aspect-ratio 1:1
 
-# Open latest
-xdg-open ~/vertex_outputs/$(ls -t ~/vertex_outputs/ | head -1)
+# Imagen predict endpoint
+python3 aiplatform_runner.py predict-image \
+  --model imagen-4.0-generate-001 \
+  --prompt "studio product shot"
+
+# STT
+python3 aiplatform_runner.py stt \
+  --model gemini-2.5-pro \
+  --audio ./sample.mp3
+
+# Virtual try-on
+python3 aiplatform_runner.py try-on \
+  --person ./person.png \
+  --product ./product.png
 ```
 
-## 🎯 Best Practices
+## 6. Output
 
-1. **Test with 720p first** for videos
-2. **Use Beta for images** (7x higher limit)
-3. **Space requests 2-5 seconds** apart
-4. **Be patient with videos** (30-120s)
-
-## 🛠️ Troubleshooting
+Default output directory:
 
 ```bash
-# No API key?
-export VERTEX_API_KEY="sk-your-key"
-
-# Video not working?
-# Only Gemini supports video:
-python3 vertex_media_generator.py video "test" -p gemini
-
-# Want higher quality?
-# Use Beta Pro model:
-python3 vertex_media_generator.py image "test" -p beta --model pro
+~/awesome-cortexai/generated
 ```
 
-## 📖 More Info
+## 7. Translate Reminder
 
-- Detailed usage: `USAGE.md`
-- Research report: `vertex-apis-comprehensive-report.html`
-- Main README: `README.md`
+For `translate.vertexapis.com`:
 
----
+- `/language/translate/v2` works
+- `/language/translate/v2/languages` works
+- plain `/v2` paths return `404`
+- `v3` and `v3beta1` work
 
-**Simple. Modular. Powerful.**
+## 8. Troubleshooting
+
+```bash
+echo "$VERTEX_API_KEY"
+python3 aiplatform_runner.py --help
+python3 aiplatform_runner.py list-models
+```
+
+## 9. More Info
+
+- `CHEATSHEET.md`
+- `AIPLATFORM_RUNNER_TEST_RESULTS.md`
+- `VERTEXAPIS_FINDINGS_2026-02-28.md`
+- `endpoints/translate-vertexapis-com.md`
