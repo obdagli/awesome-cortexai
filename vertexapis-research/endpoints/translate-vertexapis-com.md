@@ -1,18 +1,20 @@
 # translate.vertexapis.com Derin Test Raporu
 
-Tarih: 2026-03-01  
+Orijinal derin test tarihi: 2026-03-01  
 Test Edilen Domain: `translate.vertexapis.com`  
 API Key: `sk-your-api-key-here`
 
+Guncelleme notu: 2026-03-16 tarihinde path ailesi ayrimi tekrar canli dogrulandi. Sonuc: legacy Google path'leri `/language/translate/v2`, `/language/translate/v2/detect`, `/language/translate/v2/languages` calisiyor; plain root `/v2`, `/v2/detect`, `/v2/languages` ise 404 donuyor.
+
 ## Özet
 
-`translate.vertexapis.com`, birden fazla path ailesini destekliyor. Legacy Google path'i olan `/language/translate/v2` çalışıyor, düz `/v2` kısayol path'leri 404 dönüyor. `v3` ve `v3beta1` endpoint'leri de tam fonksiyonel.
+`translate.vertexapis.com`, birden fazla path ailesini destekliyor. Legacy Google path'i olan `/language/translate/v2` calisiyor, duz `/v2` kisayol path'leri 404 donuyor. `v3` ve `v3beta1` endpoint'leri de tam fonksiyonel.
 
 ## 1) API Versiyonları
 
 | Versiyon / Path Ailesi | Durum | Not |
 |------------------------|-------|-----|
-| Legacy v2 (`/language/translate/v2`) | ✅ Çalışıyor | Temel çeviri ve language list testleri başarılı |
+| Legacy v2 (`/language/translate/v2`) | ✅ Çalışıyor | Translate, detect ve languages canlı re-check ile doğrulandı |
 | Plain v2 (`/v2`) | ❌ 404 | `/v2`, `/v2/detect`, `/v2/languages` 404 |
 | v3 | ✅ Çalışıyor | Tam fonksiyonel |
 | v3beta1 | ✅ Çalışıyor | v3 ile aynı davranış |
@@ -286,6 +288,9 @@ Invalid JSON payload received. Unknown name "targetLanguageCode": Cannot find fi
 
 | Google Cloud API | translate.vertexapis.com | Durum |
 |------------------|--------------------------|-------|
+| `translation.googleapis.com/language/translate/v2` | `translate.vertexapis.com/language/translate/v2` | ✅ Legacy path calisiyor |
+| `translation.googleapis.com/language/translate/v2/detect` | `translate.vertexapis.com/language/translate/v2/detect` | ✅ Legacy path calisiyor |
+| `translation.googleapis.com/language/translate/v2/languages` | `translate.vertexapis.com/language/translate/v2/languages` | ✅ Legacy path calisiyor |
 | `translation.googleapis.com/v3/.../translateText` | `translate.vertexapis.com/v3/.../translateText` | ✅ Birebir |
 | `translation.googleapis.com/v3/.../detectLanguage` | `translate.vertexapis.com/v3/.../detectLanguage` | ✅ Birebir |
 | `translation.googleapis.com/v3/.../supportedLanguages` | `translate.vertexapis.com/v3/.../supportedLanguages` | ✅ Birebir |
@@ -299,7 +304,7 @@ Invalid JSON payload received. Unknown name "targetLanguageCode": Cannot find fi
 
 | Özellik | Google Cloud | translate.vertexapis.com |
 |---------|--------------|--------------------------|
-| Legacy v2 path (`/language/translate/v2`) | ✅ Destekleniyor | ✅ Çalışıyor |
+| Legacy v2 path (`/language/translate/v2*`) | ✅ Destekleniyor | ✅ Çalışıyor |
 | Plain `/v2` kısayol path'leri | N/A | ❌ 404 |
 | AutoML modelleri | ✅ | ❓ Test edilemedi |
 | Custom model training | ✅ | ❓ Test edilemedi |
@@ -308,7 +313,7 @@ Invalid JSON payload received. Unknown name "targetLanguageCode": Cannot find fi
 
 ### 10.1 Çalışan ama dokümanda belirtilmeyen
 
-1. **Legacy `/language/translate/v2` path'i:** Çalışıyor, ama düz `/v2` değil
+1. **Legacy `/language/translate/v2*` path'i:** Calisiyor, ama duz `/v2` degil
 2. **v3beta1 endpoint'leri:** v3 ile aynı şekilde çalışıyor
 3. **global location:** Dokümanda sadece regional location'lar var, ama global da çalışıyor
 4. **labels parametresi:** translateText'te metadata olarak kabul ediliyor
@@ -348,6 +353,7 @@ Hata mesajları net ve açıklayıcı:
 | Endpoint | Method | Durum | Not |
 |----------|--------|-------|-----|
 | `/language/translate/v2` | POST | ✅ | Legacy Google path'i çalışıyor |
+| `/language/translate/v2/detect` | POST | ✅ | Legacy Google path'i çalışıyor |
 | `/language/translate/v2/languages` | GET | ✅ | Legacy Google path'i çalışıyor |
 | `/v2` | POST | ❌ 404 | Plain root v2 path'i desteklenmiyor |
 | `/v2/detect` | POST | ❌ 404 | Plain root v2 path'i desteklenmiyor |
@@ -369,11 +375,11 @@ Hata mesajları net ve açıklayıcı:
 
 ### 13.1 Genel Değerlendirme
 
-`translate.vertexapis.com`, hem legacy `/language/translate/v2` hem de modern `v3`/`v3beta1` path ailelerini sunuyor. Plain `/v2` kısayol path'leri desteklenmiyor. Core translation özellikleri (translateText, detectLanguage, supportedLanguages) güçlü şekilde çalışıyor.
+`translate.vertexapis.com`, hem legacy `/language/translate/v2*` hem de modern `v3`/`v3beta1` path ailelerini sunuyor. Plain `/v2` kısayol path'leri desteklenmiyor. Core translation özellikleri (translateText, detectLanguage, supportedLanguages) guclu sekilde calisiyor.
 
 ### 13.2 Güçlü Yönler
 
-1. ✅ Legacy `/language/translate/v2` path'i çalışıyor
+1. ✅ Legacy `/language/translate/v2*` path'leri calisiyor
 2. ✅ translateText tam fonksiyonel (batch, HTML, multi-language)
 3. ✅ detectLanguage yüksek doğrulukla çalışıyor
 4. ✅ 230+ dil desteği
@@ -399,7 +405,7 @@ Hata mesajları net ve açıklayıcı:
 - Japonca romanizasyon
 
 **Dikkat edilmesi gerekenler:**
-- Legacy gerekiyorsa `/language/translate/v2` kullanın; düz `/v2` path'lerini kullanmayın
+- Legacy gerekiyorsa `/language/translate/v2*` kullanin; duz `/v2` path'lerini kullanmayin
 - Location olarak `us-central1` veya `global` kullanın
 - Transliteration için sadece Japonca güvenilir
 - Model parametresi için full path kullanın
@@ -414,8 +420,9 @@ Hata mesajları net ve açıklayıcı:
 
 ---
 
-**Test Tarihi:** 2026-03-01  
+**Orijinal Test Tarihi:** 2026-03-01  
 **Test Eden:** OpenCode  
+**Orijinal kampanya ozet sayilari:** Bu rakamlar 2026-03-01 derin test snapshot'ina aittir; 2026-03-16 legacy/plain v2 path re-check'i bu toplamlara dahil degildir.  
 **Toplam Test Sayısı:** 25+  
 **Başarılı Test:** 18  
 **Başarısız Test:** 4  
