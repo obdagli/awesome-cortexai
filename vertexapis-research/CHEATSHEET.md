@@ -83,6 +83,7 @@ python3 vertexapis-research/aiplatform_runner.py image \
 Live and documented behavior to remember:
 
 - `/language/translate/v2` works
+- `/language/translate/v2/detect` works
 - `/language/translate/v2/languages` works
 - plain `/v2`, `/v2/detect`, `/v2/languages` return `404`
 - `v3` and `v3beta1` translation paths work
